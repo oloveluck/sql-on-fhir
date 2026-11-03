@@ -1,0 +1,11 @@
+hl7.fhir.uv.sql-on-fhir.tgz — the SQL on FHIR Implementation Guide, version 3.0.0-ballot
+(FHIR 6.0.0-ballot5), as published to the FHIR package registry from the HL7 GitHub repository
+FHIR/sql-on-fhir-v2 (release 3.0.0-ballot; its sources are FSH + a hand-written ViewDefinition
+StructureDefinition in input/resources).
+
+  url:       https://packages2.fhir.org/packages/hl7.fhir.uv.sql-on-fhir/3.0.0-ballot
+  source:    https://github.com/FHIR/sql-on-fhir-v2 (tag 3.0.0-ballot)
+  retrieved: 2026-11-03
+  license:   CC0-1.0 (the IG's sushi-config.yaml and package.json)
+
+Refresh with: raco sql-on-fhir fetch

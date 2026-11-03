@@ -1,0 +1,11 @@
+The shared SQL on FHIR test suite: tests/*.json (and tests.schema.json) from FHIR/sql-on-fhir.js,
+the reference implementation repository the IG points to for its tests.
+
+  source:    https://github.com/FHIR/sql-on-fhir.js (tests/)
+  commit:    238d9b2be4ad0d66f9b5a9e640f6337f85b7904c (Tue Oct 13 12:53:53 2026 +1000)
+  retrieved: 2026-11-03
+  license:   MIT (LICENSE.md, copied from that repository)
+
+22 files, 144 tests. Each test: a ViewDefinition (`view`), the file's `resources`, and either the
+expected rows (`expect`, `expectColumns`) or `expectError`. Run with: raco sql-on-fhir --tck
+Refresh with: raco sql-on-fhir fetch
