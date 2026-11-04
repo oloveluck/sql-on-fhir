@@ -14,7 +14,8 @@
 (define license 'MIT)
 (define deps '("base" "fhir" "fhirpath"))
 ;; fhir-spec: regenerating the model reads the R6 core package (the model delegates to the R6 tower)
-(define build-deps '("rackunit-lib" "fhir-spec"))
+(define build-deps '("rackunit-lib" "fhir-spec" "scribble-lib" "racket-doc"))
+(define scribblings '(("scribblings/sql-on-fhir.scrbl" ())))
 (define raco-commands
   '(("sql-on-fhir" (submod sql-on-fhir/cli main) "run ViewDefinitions over FHIR data; the shared test suite; regenerate the model from the IG package" #f)))
-(define test-omit-paths '("tests/vendor" "spec"))
+(define test-omit-paths '("tests/vendor" "spec" "scribblings"))

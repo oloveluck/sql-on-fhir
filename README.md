@@ -59,5 +59,5 @@ byte-identical to what it fetches.
 raco pkg install --link --auto fhir/fhir fhir/fhir-spec fhirpath sql-on-fhir     # from source, side by side
 ```
 
-Part of the [fhir](https://github.com/oloveluck/fhir) family. License: MIT; the vendored IG package is
+Part of the [fhir](https://github.com/oloveluck/fhir) family; reference: [oloveluck.github.io/sql-on-fhir](https://oloveluck.github.io/sql-on-fhir/). License: MIT; the vendored IG package is
 CC0-1.0 and the test suite MIT (see the SOURCE.txt files).
