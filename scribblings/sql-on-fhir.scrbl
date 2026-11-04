@@ -86,6 +86,20 @@ raco sql-on-fhir fetch [--version 3.0.0-ballot] [--tests-commit <sha>]
 Formats: @tt{ndjson} (default), @tt{json}, @tt{csv}, @tt{fhir}. Exit codes: 0, 1 on an error or a
 suite regression, 2 on usage.
 
+@section{Limits}
+
+@itemlist[
+@item{No SQL database: views are evaluated in memory through the fhirpath engine, one row list per
+view. The earlier DuckDB backend was removed.}
+@item{@tt{$sql-run} ignores @tt{parameters}, @tt{context}, @tt{group} and @tt{source}; a
+@tt{patient} that does not resolve filters to nothing rather than failing; only ViewDefinition
+subjects (no SQLQuery or SQLView Libraries); no Parquet.}
+@item{@tt{$sql-export} completes synchronously, with the results inline as Binaries under
+@tt{urn:sql-export:} locations: no job, polling, cancellation or download urls; @tt{_format=fhir}
+becomes ndjson; duplicate output names are not rejected.}
+@item{A column's @tt{type} and @tt{tag} are not enforced; constants must be primitives;
+@tt{getReferenceKey()} expects relative @tt{Type/id} references.}]
+
 @section{Reference}
 
 @subsection[#:style 'unnumbered]{@hash-lang[] @tt{sql-on-fhir}}
