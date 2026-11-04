@@ -17,7 +17,8 @@ Part of the @hyperlink["https://github.com/oloveluck/fhir"]{fhir} family; depend
 @section{Install}
 
 @verbatim{
-raco pkg install --link --auto fhir/fhir fhir/fhir-spec fhirpath sql-on-fhir      # from source
+raco pkg install --link --auto fhir/fhir fhir/fhir-spec fhirpath sql-on-fhir
+    # from source
 }
 
 @section{Writing a view}
@@ -62,8 +63,10 @@ Parameters); data comes from @racket[current-data-source] or @tt{#:resource} inp
 @racketblock[
 (require fhir/operation fhir/data-source sql-on-fhir/operations)
 (parameterize ([current-data-source (directory->data-source "patients/")])
-  ($sql-run view #:_format "csv")                                                (code:comment "the view is the subject")
-  (apply-operation "$sql-run" #:subjectCanonical "http://example.org/ViewDefinition/x" #:_format "fhir"))
+  (code:comment "the view is the subject")
+  ($sql-run view #:_format "csv")
+  (apply-operation "$sql-run" #:subjectCanonical "http://example.org/ViewDefinition/x"
+                   #:_format "fhir"))
 ]
 
 Over HTTP, fhir-server's @racket[(serve-operations (list $sql-run $sql-export) #:port 8080)]
@@ -72,9 +75,11 @@ serves them with a CapabilityStatement naming the IG's definitions.
 @bold{Command line.}
 
 @verbatim{
-raco sql-on-fhir run readings.sof patients/ --format csv    a view (JSON or a module) over a directory, Bundle or resource
+raco sql-on-fhir run readings.sof patients/ --format csv
+    a view (JSON or a module) over a directory, Bundle or resource
 raco sql-on-fhir tck [-v]                                   the shared suite (floor 144)
-raco sql-on-fhir regen | check                              regenerate the model from spec/; verify it is current
+raco sql-on-fhir regen | check
+    regenerate the model from spec/; verify it is current
 raco sql-on-fhir fetch [--version 3.0.0-ballot] [--tests-commit <sha>]
 }
 
