@@ -20,7 +20,7 @@
 ;;; $sql-export runs every `subject` now and returns the completed manifest, one `output` per subject
 ;;; with its result inline as a Binary (no job store, no polling).
 
-(require racket/list racket/string racket/match json net/base64
+(require racket/contract racket/list racket/string racket/match json net/base64
          fhir/operation fhir/data-source
          (only-in sql-on-fhir/model/types)                  ; registers ViewDefinition over the R6 tower
          (only-in sql-on-fhir/model/operations sql-run-definition sql-export-definition)
@@ -29,8 +29,17 @@
          (only-in fhir/result/result ok? ok-value err-error)
          (only-in fhir/result/result validation-error-message))
 
-(provide $sql-run $sql-export view-rows
-         rows->csv rows->ndjson rows->json)
+(provide
+ (contract-out
+  ;; the IG's two operations as fhir/operation values ($sql-run's subject is the ViewDefinition)
+  [$sql-run operation?]
+  [$sql-export operation?]
+  ;; a ViewDefinition over the data source (or the resources given) -> its rows, each a hash column -> value
+  [view-rows (->* (hash?) ((or/c #f (listof hash?))) (listof hash?))]
+  ;; the output formats over eval-view's rows (a Row is an ordered (listof (cons column jsexpr)))
+  [rows->csv (->* (list? list?) (#:header? boolean?) string?)]
+  [rows->ndjson (-> list? string?)]
+  [rows->json (-> list? string?)]))
 
 ;; ---- the view and its data ----------------------------------------------------------------------
 ;; typed-view : ViewDefinition jsexpr -> typed node   strict: the generated schema validates it
