@@ -3,33 +3,26 @@
 
 @title{sql-on-fhir: SQL on FHIR for Racket}
 
-@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR} ViewDefinitions as a
-Racket language, a view engine over FHIR data, and the IG's @tt{$sql-run} and @tt{$sql-export}
-operations. The ViewDefinition model and the operations' definitions are generated from HL7's
-published package (3.0.0-ballot), so a view is checked against the IG's own model when it compiles.
-The shared test suite from FHIR/sql-on-fhir.js passes, 144/144.
-
-Part of the @hyperlink["https://github.com/oloveluck/fhir"]{fhir} family; depends on @tt{fhir} and
-@tt{fhirpath}.
+@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR} for Racket. You write a
+ViewDefinition, a flat table over one resource type with a FHIRPath per column, in a @tt{.sof} file;
+@tt{raco sql-on-fhir run} evaluates it over a directory of resources and prints rows. The
+ViewDefinition model is generated from HL7's published package, so a view is checked against the
+IG's own model when it compiles, and the IG's @tt{$sql-run} and @tt{$sql-export} operations are
+provided. The shared test suite passes, 144 of 144. Part of the
+@hyperlink["https://github.com/oloveluck/fhir"]{fhir} family.
 
 @table-of-contents[]
 
-@section{Install}
+@section{Quick start}
+
+@bold{1. Install.} The packages are not on the Racket package server yet; clone the repositories
+side by side and install from source:
 
 @verbatim{
 raco pkg install --link --auto fhir/fhir fhir/fhir-spec fhirpath sql-on-fhir
-    # from source
 }
 
-@section{Writing a view}
-
-A ViewDefinition picks a resource type, filters it (@tt{where}), and selects columns, each a
-FHIRPath path. The forms are the IG's elements in the @tt{fhir/r6} form syntax: @tt{ViewDefinition},
-@tt{ViewDefinitionWhere}, @tt{ViewDefinitionSelect} (@tt{column}, nested @tt{select},
-@tt{forEach}, @tt{forEachOrNull}, @tt{repeat}, @tt{unionAll}), @tt{ViewDefinitionSelectColumn}
-(@tt{path}, @tt{name}, @tt{description}, @tt{collection}, @tt{type}, @tt{tag}),
-@tt{ViewDefinitionConstant} (a @tt{%name} for paths). A misspelled element, a wrong type, or a
-@tt{status} outside its value set is a compile error.
+@bold{2. Write a view.}
 
 @verbatim|{#lang sql-on-fhir
 (ViewDefinition
@@ -41,62 +34,76 @@ FHIRPath path. The forms are the IG's elements in the @tt{fhir/r6} form syntax: 
                   (ViewDefinitionSelectColumn (name "systolic")
                     (path "component.where(code.coding.code = '8480-6').value.ofType(Quantity).value"))))))}|
 
-Paths may use @tt{getResourceKey()}, @tt{getReferenceKey(Type)}, @tt{%rowIndex} and the view's
-constants.
+@bold{3. Run it over a directory of resources.}
+
+@verbatim{
+$ raco sql-on-fhir run readings.sof patients/ --format csv
+patient,date,systolic
+p1,2024-03-01T09:00:00Z,152
+p1,2024-04-02T09:30:00Z,138
+}
+
+A misspelled element, a wrong type or a @tt{status} outside its value set is a compile error on the
+form.
+
+@section{Writing a view}
+
+A ViewDefinition picks a resource type, filters it (@tt{where}) and selects columns, each a FHIRPath
+path. The forms are the IG's elements in the @tt{fhir/r6} form syntax: @tt{ViewDefinition},
+@tt{ViewDefinitionWhere}, @tt{ViewDefinitionSelect} (@tt{column}, nested @tt{select},
+@tt{forEach}, @tt{forEachOrNull}, @tt{repeat}, @tt{unionAll}), @tt{ViewDefinitionSelectColumn}
+(@tt{path}, @tt{name}, @tt{description}, @tt{collection}, @tt{type}, @tt{tag}) and
+@tt{ViewDefinitionConstant} (a @tt{%name} for paths). Paths may use @tt{getResourceKey()},
+@tt{getReferenceKey(Type)}, @tt{%rowIndex} and the view's constants. The reference is the
+@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR IG}.
 
 @section{Using it}
 
-@bold{As a module.} @racket[(require "readings.sof")] gives @racket[resources] (typed nodes),
-@racket[(->nodes)] and @racket[(->json)] (the ViewDefinition as JSON). @tt{racket readings.sof}
-prints the JSON.
+@subsection{Command line}
+
+@tabular[#:style 'boxed #:sep @hspace[2]
+(list (list @tt{raco sql-on-fhir run view.sof data/ [--format ndjson|json|csv|fhir]} "a view (a module or JSON) over a directory, Bundle or resource")
+      (list @tt{raco sql-on-fhir tck [-v]} "the shared suite (floor 144)")
+      (list @tt{raco sql-on-fhir regen | check} @elem{regenerate the model from @tt{spec/}; verify it is current})
+      (list @tt{raco sql-on-fhir fetch [--version v] [--tests-commit sha]} "refresh the package and the suite"))]
+
+Exit codes: 0, 1 on an error or a suite regression, 2 on usage.
+
+@subsection{As a module}
+
+@racket[(require "readings.sof")] gives @racket[resources] (typed nodes), @racket[(->nodes)] and
+@racket[(->json)] (the ViewDefinitions as JSON). @tt{racket readings.sof} prints the JSON.
 
 @racketblock[
 (require (only-in "readings.sof" [->json views])
          fhir/data-source (only-in sql-on-fhir/operations view-rows))
 (parameterize ([current-data-source (resources->data-source observations)])
-  (view-rows (car (views))))         (code:comment "a list of hashes: one per reading")
+  (view-rows (car (views))))         (code:comment "a list of hashes, one per reading")
 ]
 
-@bold{As an operation.} @tt{$sql-run} answers the IG's formats as a Binary (or rows as a
-Parameters); data comes from @racket[current-data-source] or @tt{#:resource} inputs.
+@subsection{As an operation}
+
+@tt{$sql-run} answers the IG's formats as a Binary (or rows as a Parameters); data comes from
+@racket[current-data-source] or @tt{#:resource} inputs. fhir-server serves the same values over
+HTTP with @racket[(serve-operations (list $sql-run $sql-export) #:port 8080)].
 
 @racketblock[
 (require fhir/operation fhir/data-source sql-on-fhir/operations)
 (parameterize ([current-data-source (directory->data-source "patients/")])
-  (code:comment "the view is the subject")
-  ($sql-run view #:_format "csv")
-  (apply-operation "$sql-run" #:subjectCanonical "http://example.org/ViewDefinition/x"
-                   #:_format "fhir"))
+  ($sql-run view #:_format "csv")                       (code:comment "the view is the subject")
+  (apply-operation "$sql-run" #:subjectCanonical "http://example.org/ViewDefinition/x" #:_format "fhir"))
 ]
-
-Over HTTP, fhir-server's @racket[(serve-operations (list $sql-run $sql-export) #:port 8080)]
-serves them with a CapabilityStatement naming the IG's definitions.
-
-@bold{Command line.}
-
-@verbatim{
-raco sql-on-fhir run readings.sof patients/ --format csv
-    a view (JSON or a module) over a directory, Bundle or resource
-raco sql-on-fhir tck [-v]                                   the shared suite (floor 144)
-raco sql-on-fhir regen | check
-    regenerate the model from spec/; verify it is current
-raco sql-on-fhir fetch [--version 3.0.0-ballot] [--tests-commit <sha>]
-}
-
-Formats: @tt{ndjson} (default), @tt{json}, @tt{csv}, @tt{fhir}. Exit codes: 0, 1 on an error or a
-suite regression, 2 on usage.
 
 @section{Limits}
 
 @itemlist[
 @item{No SQL database: views are evaluated in memory through the fhirpath engine, one row list per
-view. The earlier DuckDB backend was removed.}
+view.}
 @item{@tt{$sql-run} ignores @tt{parameters}, @tt{context}, @tt{group} and @tt{source}; a
-@tt{patient} that does not resolve filters to nothing rather than failing; only ViewDefinition
-subjects (no SQLQuery or SQLView Libraries); no Parquet.}
-@item{@tt{$sql-export} completes synchronously, with the results inline as Binaries under
-@tt{urn:sql-export:} locations: no job, polling, cancellation or download urls; @tt{_format=fhir}
-becomes ndjson; duplicate output names are not rejected.}
+@tt{patient} that does not resolve filters to nothing; only ViewDefinition subjects (no SQLQuery or
+SQLView Libraries); no Parquet.}
+@item{@tt{$sql-export} completes synchronously, with the results inline as Binaries: no job, polling,
+cancellation or download urls; @tt{_format=fhir} becomes ndjson.}
 @item{A column's @tt{type} and @tt{tag} are not enforced; constants must be primitives;
 @tt{getReferenceKey()} expects relative @tt{Type/id} references.}]
 
