@@ -1,27 +1,20 @@
 # sql-on-fhir — SQL on FHIR
 
-[SQL on FHIR](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/) ViewDefinitions run over FHIR data as
-tables, with the IG's `$sql-run` and `$sql-export` operations. The model and the operations are
-generated from HL7's own published package, and the shared test suite passes: **144/144**.
+[SQL on FHIR](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/): run a ViewDefinition over FHIR data
+and get a table, as CSV, NDJSON or JSON. The model is generated from HL7's published package and the
+shared test suite passes; [TESTING.md](TESTING.md) has the details.
 
 Part of the [fhir](https://github.com/oloveluck/fhir) family of FHIR languages and tools.
 
 ## Command line
 
-`sql-on-fhir` is one of the family's command-line tools, which run without Racket:
-[build them once](https://github.com/oloveluck/fhir#getting-the-tools) and put `dist/bin` on your
-`PATH`. With Racket and the packages installed, `raco sql-on-fhir` runs the same commands.
+[Build the family's tools](https://github.com/oloveluck/fhir#getting-the-tools) once and put
+`dist/bin` on your `PATH`; they run without Racket. With Racket installed, `raco sql-on-fhir` is the
+same.
 
 ```sh
-sql-on-fhir run view.json patients/ --format csv     # a directory of resources, a Bundle or one resource
-sql-on-fhir run view.json bundle.json                # NDJSON, one row per line (the default)
-```
-
-With `view.json`:
-
-```json
-{"resourceType":"ViewDefinition","name":"patient_demographics","status":"active","resource":"Patient",
- "select":[{"column":[{"name":"id","path":"getResourceKey()"},{"name":"gender","path":"gender"},{"name":"birth_date","path":"birthDate"}]}]}
+sql-on-fhir run view.json patients/ --format csv     # a directory, a Bundle or one resource
+sql-on-fhir run view.json bundle.json                # NDJSON, the default
 ```
 
 ```
@@ -31,21 +24,13 @@ p1,female,1974-12-25
 p2,male,1990-03-01
 ```
 
-`--format` is `ndjson` (the default), `json`, `csv` or `fhir` (a Parameters resource). A view whose
-structure is not a ViewDefinition's is refused with the reason and exit status 1:
-
-```
-$ sql-on-fhir run bad-view.json patients/
-sql-on-fhir: not a valid ViewDefinition: ViewDefinitionSelect: unknown field colum (see https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/viewdefinition.html#ViewDefinition.select)
-```
-
-A code outside a required value set (`"status": "florp"`) is caught when the view is written in
-`#lang sql-on-fhir`, below, but not in a JSON view at run time.
+A view whose structure isn't a ViewDefinition's, such as a misspelled element, is refused with the
+reason and exit status 1.
 
 ## In Racket
 
-`#lang sql-on-fhir` makes a view a module, written in the forms generated from the IG's model. A
-misspelled element, a wrong type or a `status` outside its required value set is a compile error:
+`#lang sql-on-fhir` writes a view in forms generated from the IG, so a misspelled element or a
+`status` outside its value set is a compile error:
 
 ```racket
 #lang sql-on-fhir
@@ -56,58 +41,15 @@ misspelled element, a wrong type or a `status` outside its required value set is
                   (ViewDefinitionSelectColumn (name "gender") (path "gender"))))))
 ```
 
-`racket view.rkt` prints the ViewDefinition's JSON, and `raco sql-on-fhir run view.rkt <data>` runs
-it. A Racket program gets the rows directly:
-
-```racket
-#lang racket/base
-(require racket/list json sql-on-fhir/operations fhir/serialize/to-json
-         (only-in "view.rkt" resources))
-
-(define view (node->jsexpr (first resources)))
-(define patients (for/list ([f (directory-list "patients" #:build? #t)]) (call-with-input-file f read-json)))
-(view-rows view patients)                  ; one hash per row
-```
-
-`$sql-run` and `$sql-export` are [fhir/operation](https://github.com/oloveluck/fhir) values defined by
-the IG's OperationDefinitions: apply them like procedures, thread them, or serve them over HTTP.
-
-```racket
-(require fhir/operation fhir/data-source sql-on-fhir/operations)
-
-(parameterize ([current-data-source (directory->data-source "patients/")])
-  ($sql-run view #:_format "csv")                                  ; the view is the subject
-  (apply-operation "$sql-run" #:subjectCanonical "http://…/ViewDefinition/x" #:_format "fhir"))
-
-;; over HTTP, /metadata advertising the IG's own canonical (fhir-server)
-(serve-operations (list $sql-run $sql-export) #:port 8080)
-```
-
-Inputs follow the OperationDefinition: the view as the subject (`subjectResource`), `subjectCanonical`
-or `subjectReference` from the data source; data from `resource` inputs (Bundles unwrapped) or the
-data source, filtered by `patient` and `_since`; `_format` ndjson (the default), json, csv (`header`) as
-a Binary, or `fhir` as a Parameters; `_limit`. `$sql-export` completes synchronously.
-
-## From the spec
-
-| What | From | How |
-|---|---|---|
-| the model (`ViewDefinition`, `#lang sql-on-fhir`, required-binding checks) | `spec/hl7.fhir.uv.sql-on-fhir.tgz`: 3.0.0-ballot, published to the FHIR registry from HL7's [FHIR/sql-on-fhir-v2](https://github.com/FHIR/sql-on-fhir-v2) | generated by the fhir package's codegen (`target.rkt`, `raco sql-on-fhir regen`; `check` verifies) |
-| the operations' definitions | the same package's OperationDefinitions | generated as data (`model/operations.rkt`) |
-| the test suite | `tests/vendor/sql-on-fhir-tests`: the shared suite from [FHIR/sql-on-fhir.js](https://github.com/FHIR/sql-on-fhir.js) | `raco sql-on-fhir tck`, floor 144/144 |
+`view-rows` (`sql-on-fhir/operations`) gives the rows as hashes, and `$sql-run` and `$sql-export` are
+operations you apply like procedures or serve over HTTP.
 
 ## Develop
 
-From source, with the family's repositories side by side:
-
 ```sh
-raco pkg install --link --auto ../fhir/fhir ../fhir/fhir-spec ../fhirpath .
-raco test .                     # unit tests and the shared suite
-raco sql-on-fhir tck [-v]       # the shared suite, with its report
-raco sql-on-fhir regen | check  # regenerate the model from spec/, or verify it is up to date
-raco sql-on-fhir fetch [--version V] [--tests-commit SHA]   # pull the IG package and the suite again
+raco pkg install --link --auto ../fhir/fhir ../fhir/fhir-spec ../fhirpath .   # repos side by side
+raco test .
 ```
 
-The vendored copies are byte-identical to what `fetch` pulls. Reference documentation:
-[oloveluck.github.io/sql-on-fhir](https://oloveluck.github.io/sql-on-fhir/). License: MIT; the
-vendored IG package is CC0-1.0 and the test suite MIT (see the SOURCE.txt files).
+Reference: [oloveluck.github.io/sql-on-fhir](https://oloveluck.github.io/sql-on-fhir/). License: MIT;
+the vendored IG package is CC0-1.0 and the test suite MIT.
