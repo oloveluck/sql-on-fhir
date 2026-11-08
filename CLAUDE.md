@@ -18,3 +18,7 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
 - **tests/** — harness.rkt runs one suite file (strict view parse = expectError, multiset row
   comparison, expectColumns order); run.rkt is `raco sql-on-fhir tck` with the floor; tck-test.rkt is
   what `raco test` runs. The suite is vendored verbatim (SOURCE.txt with the commit); `fetch` refreshes.
+- **workspace.rkt** — the workspace support (fhir/lang/workspace): a ViewDefinition as JSON
+  (`*.view.json`) is an artifact (url `<canonical>/ViewDefinition/<stem>` unless it has one), checked by
+  the strict parse; `run` = its rows in column order; `explain` of a resource = the rows it alone
+  produces, the rows without `where`, and each `where` clause alone.
