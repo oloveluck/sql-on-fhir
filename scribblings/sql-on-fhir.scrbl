@@ -1,9 +1,9 @@
 #lang scribble/manual
 @(require (for-label racket/base racket/contract sql-on-fhir/view sql-on-fhir/operations))
 
-@title{sql-on-fhir: SQL on FHIR for Racket}
+@title{sql-on-fhir: SQL on FHIR}
 
-@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR} for Racket. You write a
+@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR}, run over FHIR data. You write a
 ViewDefinition, a flat table over one resource type with a FHIRPath per column, in a @tt{.sof} file;
 @tt{raco sql-on-fhir run} evaluates it over a directory of resources and prints rows. The
 ViewDefinition model is generated from HL7's published package, so a view is checked against the

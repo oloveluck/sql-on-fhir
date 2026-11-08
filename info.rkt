@@ -1,6 +1,6 @@
 #lang info
 
-;; sql-on-fhir — SQL on FHIR for Racket: ViewDefinitions as a generated #lang, the view engine, and
+;; sql-on-fhir — SQL on FHIR: ViewDefinitions as a generated #lang, the view engine, and
 ;; the IG's operations ($sql-run, $sql-export) as fhir/operation values.
 ;;
 ;; The model and the operations' definitions are GENERATED from the IG package (spec/, pulled from the
@@ -9,7 +9,7 @@
 
 (define collection "sql-on-fhir")
 (define version "0.1")
-(define pkg-desc "SQL on FHIR for Racket: ViewDefinitions generated from the IG package (#lang sql-on-fhir), a view engine over FHIR data, and the IG's $sql-run / $sql-export operations; raco sql-on-fhir")
+(define pkg-desc "SQL on FHIR: ViewDefinitions run over FHIR data as tables, the model generated from the IG package, and the IG's $sql-run / $sql-export operations; the sql-on-fhir command-line tool and #lang sql-on-fhir")
 (define pkg-authors '(oloveluck))
 (define license 'MIT)
 (define deps '("base" "fhir" "fhirpath"))
