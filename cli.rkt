@@ -10,12 +10,18 @@
 ;;;   raco sql-on-fhir fetch [--version V] [--tests-commit SHA]
 ;;;       pull the IG package from the FHIR package registry and the test suite from GitHub
 
-(require racket/list racket/file racket/port racket/runtime-path json net/url net/base64
+(require racket/list racket/file racket/port json net/url net/base64
          fhir/subcommands fhir/operation fhir/data-source
          (only-in fhir/serialize/to-json node->jsexpr)
          (only-in sql-on-fhir/operations $sql-run))
 
-(define-runtime-path here ".")
+;; here : -> path   the package's source directory, where `fetch` writes the IG package and the test
+;; suite. A development command's destination, not a file the tools read at run time, so it is not a
+;; runtime path (a standalone build would otherwise try to carry the whole repository with it).
+(define (here)
+  (define src (variable-reference->module-source (#%variable-reference)))
+  (unless (path? src) (raise-user-error 'sql-on-fhir "fetch works in a source checkout of sql-on-fhir"))
+  (let-values ([(dir _name _dir?) (split-path src)]) dir))
 
 (define usages
   '(("run"   "raco sql-on-fhir run <view.json | view.rkt> [<data dir | bundle.json | resource.json>] [--format ndjson|json|csv|fhir]")
@@ -73,13 +79,13 @@
   (define version (opt args "--version" "3.0.0-ballot"))
   (define commit (opt args "--tests-commit" "main"))
   (define pkg (download (format "https://packages2.fhir.org/packages/hl7.fhir.uv.sql-on-fhir/~a" version)))
-  (call-with-output-file (build-path here "spec" "hl7.fhir.uv.sql-on-fhir.tgz") #:exists 'truncate
+  (call-with-output-file (build-path (here) "spec" "hl7.fhir.uv.sql-on-fhir.tgz") #:exists 'truncate
     (lambda (o) (write-bytes pkg o)))
   (printf "spec/hl7.fhir.uv.sql-on-fhir.tgz: hl7.fhir.uv.sql-on-fhir#~a (~a bytes) — update spec/SOURCE.txt, then raco sql-on-fhir regen\n"
           version (bytes-length pkg))
   ;; the tests directory, file by file, through the GitHub contents API
   (define listing (bytes->jsexpr (download (format "https://api.github.com/repos/FHIR/sql-on-fhir.js/contents/tests?ref=~a" commit))))
-  (define dest (build-path here "tests" "vendor" "sql-on-fhir-tests"))
+  (define dest (build-path (here) "tests" "vendor" "sql-on-fhir-tests"))
   (define n
     (for/sum ([f (in-list listing)] #:when (regexp-match? #rx"[.]json$" (hash-ref f 'name "")))
       (call-with-output-file (build-path dest (hash-ref f 'name)) #:exists 'truncate
