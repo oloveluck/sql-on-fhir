@@ -131,7 +131,7 @@
 (define workspace-support (ws-support "sql-on-fhir" artifacts run explain))
 
 (module+ test
-  (require rackunit (only-in fhir/data-source resources->data-source))
+  (require rackunit (only-in fhir/data-source resources->data-source) (only-in fhir/diagnostic diagnostic-loc diagnostic-message loc-line))
   (define-values (ws _) (open-workspace (find-system-path 'temp-dir)))
   (define text (jsexpr->string
                 (hasheq 'resourceType "ViewDefinition" 'name "active_patients" 'status "active" 'resource "Patient"
@@ -151,4 +151,16 @@
     (define e (explain ws #f text "Patient/b" (hasheq)))
     (check-equal? (hash-ref e 'rows) '())
     (check-equal? (hash-ref e 'rowsWithoutWhere) 1)
-    (check-equal? (hash-ref (car (hash-ref e 'where)) 'holds) #f)))
+    (check-equal? (hash-ref (car (hash-ref e 'where)) 'holds) #f))
+  ;; a path to an element the type does not have is an error at its string in the file (inside a
+  ;; forEach, against the element it iterates); functions and getReferenceKey(T) are not
+  (define typos (string-append
+                 "{\"resource\": \"Patient\", \"status\": \"active\",\n"
+                 " \"where\": [{\"path\": \"activ = true\"}],\n"
+                 " \"select\": [{\"column\": [{\"name\": \"org\", \"path\": \"managingOrganization.getReferenceKey(Organization)\"}]},\n"
+                 "  {\"forEach\": \"name\", \"column\": [{\"name\": \"f\", \"path\": \"famly\"}]}]}"))
+  (define-values (_rs tds) (artifacts ws (list (cons "/tmp/typos.view.json" typos))))
+  (check-equal? (sort (map (lambda (d) (list (loc-line (diagnostic-loc d)) (diagnostic-message d))) tds)
+                      < #:key car)
+                '((2 "no element Patient.activ (did you mean `active`?)")
+                  (4 "no element HumanName.famly (did you mean `family`?)"))))

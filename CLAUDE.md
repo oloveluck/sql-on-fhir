@@ -37,3 +37,8 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
   (only the form macros' field-specs do), so `operations.rkt`'s `typed-view` reads the required
   bindings from the IG's StructureDefinition snapshot in `spec/` (once, lazily) and checks each code
   against the generated terminology's expansion — all 144 suite views pass it.
+- **Claude as the user** (2026-11-09; the main repo's CLAUDE.md): the workspace checks every column,
+  forEach and where path against the view's resource (`path-problems`, FHIRPath's static pass after
+  `rewrite-sof`; inside a forEach against the element it iterates; `repeat` left to run time) and
+  reports an element the type lacks at its string in the file, with a suggestion. 0 of the 144 suite
+  views are flagged; workspace.rkt's test pins two typos at their lines.
