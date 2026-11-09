@@ -25,7 +25,8 @@ p2,male,1990-03-01
 ```
 
 A view whose structure isn't a ViewDefinition's, such as a misspelled element, is refused with the
-reason and exit status 1.
+reason and exit status 1, and so is a view that fails on the data. A `#lang sql-on-fhir` module runs
+the same way: `sql-on-fhir run readings.sof patients/`.
 
 ## In Racket
 
@@ -51,5 +52,7 @@ raco pkg install --link --auto ../fhir/fhir ../fhir/fhir-spec ../fhirpath .   # 
 raco test .
 ```
 
-Reference: [oloveluck.github.io/sql-on-fhir](https://oloveluck.github.io/sql-on-fhir/). License: MIT;
+Reference: [oloveluck.github.io/sql-on-fhir](https://oloveluck.github.io/sql-on-fhir/). The format for
+agents, with a checked cheat sheet and the common problems: [guide.md](guide.md); the workflow
+without MCP: [.claude/skills/sql-on-fhir](.claude/skills/sql-on-fhir/SKILL.md). License: MIT;
 the vendored IG package is CC0-1.0 and the test suite MIT.

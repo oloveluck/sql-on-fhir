@@ -134,7 +134,12 @@
 ;; run : view-jsexpr inputs format -> resource   one view, formatted
 (define (run view in fmt #:limit [limit #f] #:header? [header? #t])
   (define v (typed-view view))
-  (define rows-all (eval-view v (filter-map typed-resource (view-data in view))))
+  ;; a view that fails on the data (a column with several values and no `collection`) is the
+  ;; operation's error, an OperationOutcome, not a crash
+  (define rows-all
+    (with-handlers ([(lambda (e) (and (exn:fail? e) (not (exn:fail:operation? e))))
+                     (lambda (e) (operation-error "processing" "~a" (regexp-replace #rx"^eval-view: " (exn-message e) "")))])
+      (eval-view v (filter-map typed-resource (view-data in view)))))
   (define rows (if (and (exact-integer? limit) (>= limit 0)) (take rows-all (min limit (length rows-all))) rows-all))
   (match fmt
     ["ndjson" (binary "application/x-ndjson" (rows->ndjson rows))]

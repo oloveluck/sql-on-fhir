@@ -1,11 +1,12 @@
 #lang scribble/manual
-@(require (for-label racket/base racket/contract sql-on-fhir/view sql-on-fhir/operations))
+@(require (for-label racket/base racket/contract sql-on-fhir/view sql-on-fhir/operations sql-on-fhir/workspace))
 
 @title{sql-on-fhir: SQL on FHIR}
 
 @hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR}, run over FHIR data. You write a
-ViewDefinition, a flat table over one resource type with a FHIRPath per column, in a @tt{.sof} file;
-@tt{raco sql-on-fhir run} evaluates it over a directory of resources and prints rows. The
+ViewDefinition, a flat table over one resource type with a FHIRPath per column, as JSON (a
+@tt{*.view.json} file, the specification's own form) or as @hash-lang[] @tt{sql-on-fhir} forms in a
+@tt{.sof} file; @tt{raco sql-on-fhir run} evaluates it over a directory of resources and prints rows. The
 ViewDefinition model is generated from HL7's published package, so a view is checked against the
 IG's own model when it compiles, and the IG's @tt{$sql-run} and @tt{$sql-export} operations are
 provided. The shared test suite passes, 144 of 144. Part of the
@@ -44,7 +45,9 @@ p1,2024-04-02T09:30:00Z,138
 }
 
 A misspelled element, a wrong type or a @tt{status} outside its value set is a compile error on the
-form.
+form. The same view as JSON runs the same way (@tt{raco sql-on-fhir run readings.view.json patients/});
+JSON is checked against the generated model when it runs, so a misspelled element is refused with
+its name and exit status 1.
 
 @section{Writing a view}
 
@@ -55,19 +58,22 @@ path. The forms are the IG's elements in the @tt{fhir/r6} form syntax: @tt{ViewD
 (@tt{path}, @tt{name}, @tt{description}, @tt{collection}, @tt{type}, @tt{tag}) and
 @tt{ViewDefinitionConstant} (a @tt{%name} for paths). Paths may use @tt{getResourceKey()},
 @tt{getReferenceKey(Type)}, @tt{%rowIndex} and the view's constants. The reference is the
-@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR IG}.
+@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR IG}. The repository's
+@tt{guide.md} has a checked cheat sheet, a worked example and the common problems (a column that
+yields several values, a @tt{forEach} that drops resources, choice elements, references).
 
 @section{Using it}
 
 @subsection{Command line}
 
 @tabular[#:style 'boxed #:sep @hspace[2]
-(list (list @tt{raco sql-on-fhir run view.sof data/ [--format ndjson|json|csv|fhir]} "a view (a module or JSON) over a directory, Bundle or resource")
+(list (list @tt{raco sql-on-fhir run view.json data/ [--format ndjson|json|csv|fhir]} @elem{a view (JSON, or a @hash-lang[] @tt{sql-on-fhir} module of any extension) over a directory, Bundle or resource})
       (list @tt{raco sql-on-fhir tck [-v]} "the shared suite (floor 144)")
       (list @tt{raco sql-on-fhir regen | check} @elem{regenerate the model from @tt{spec/}; verify it is current})
       (list @tt{raco sql-on-fhir fetch [--version v] [--tests-commit sha]} "refresh the package and the suite"))]
 
-Exit codes: 0, 1 on an error or a suite regression, 2 on usage.
+Exit codes: 0, 1 on an error (a view the model refuses, a file that is not JSON, a view that fails on
+the data — each one line with the reason) or a suite regression, 2 on usage.
 
 @subsection{As a module}
 
@@ -84,7 +90,9 @@ Exit codes: 0, 1 on an error or a suite regression, 2 on usage.
 @subsection{As an operation}
 
 @tt{$sql-run} answers the IG's formats as a Binary (or rows as a Parameters); data comes from
-@racket[current-data-source] or @tt{#:resource} inputs. fhir-server serves the same values over
+@racket[current-data-source] or @tt{#:resource} inputs. A view that fails on the data (a column
+yielding several values without @tt{collection}) is the operation's error, an OperationOutcome
+with code @tt{processing}. fhir-server serves the same values over
 HTTP with @racket[(serve-operations (list $sql-run $sql-export) #:port 8080)].
 
 @racketblock[
@@ -93,6 +101,15 @@ HTTP with @racket[(serve-operations (list $sql-run $sql-export) #:port 8080)].
   ($sql-run view #:_format "csv")                       (code:comment "the view is the subject")
   (apply-operation "$sql-run" #:subjectCanonical "http://example.org/ViewDefinition/x" #:_format "fhir"))
 ]
+
+@section{In an editor, for an agent}
+
+@tt{sql-on-fhir/workspace} is what fhir-mcp runs for an agent: a @tt{*.view.json} file is a
+ViewDefinition (checked as it is written), @tt{run} gives its rows over the workspace's data, and
+@tt{explain} of one resource gives the rows it alone produces, its rows without the @tt{where}, and
+each @tt{where} on its own. It also provides the repository's @tt{guide.md} as @racket[guide],
+which fhir-mcp serves as @tt{learn://sql-on-fhir}. Without MCP, the repository's Claude skill
+(@tt{.claude/skills/sql-on-fhir}) gives an agent the same workflow with the command line and Racket.
 
 @section{Limits}
 
@@ -105,7 +122,10 @@ SQLView Libraries); no Parquet.}
 @item{@tt{$sql-export} completes synchronously, with the results inline as Binaries: no job, polling,
 cancellation or download urls; @tt{_format=fhir} becomes ndjson.}
 @item{A column's @tt{type} and @tt{tag} are not enforced; constants must be primitives;
-@tt{getReferenceKey()} expects relative @tt{Type/id} references.}]
+@tt{getReferenceKey()} expects relative @tt{Type/id} references (an absolute url gives null).}
+@item{A view given as JSON is checked for its structure (elements, types, cardinality), not for its
+bindings: a @tt{status} outside its value set is caught only in the @hash-lang[] @tt{sql-on-fhir}
+form.}]
 
 @section{Reference}
 
@@ -144,3 +164,10 @@ the data source's.}
 @defproc[(rows->ndjson [rows list?]) string?]
 @defproc[(rows->json [rows list?]) string?]
 @defproc[(rows->csv [columns list?] [rows list?] [#:header? header? boolean? #t]) string?])]{The formats, over @racket[eval-view]'s rows.}
+
+@subsection[#:style 'unnumbered]{@tt{sql-on-fhir/workspace}}
+@defmodule[sql-on-fhir/workspace]
+
+@defthing[workspace-support any/c]{The @tt{fhir/lang/workspace} support fhir-mcp loads for views.}
+@defthing[guide string?]{The repository's @tt{guide.md}: the format for agents (fhir-mcp's
+@tt{learn://sql-on-fhir}).}

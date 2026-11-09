@@ -21,4 +21,14 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
 - **workspace.rkt** — the workspace support (fhir/lang/workspace): a ViewDefinition as JSON
   (`*.view.json`) is an artifact (url `<canonical>/ViewDefinition/<stem>` unless it has one), checked by
   the strict parse; `run` = its rows in column order; `explain` of a resource = the rows it alone
-  produces, the rows without `where`, and each `where` clause alone.
+  produces, the rows without `where`, and each `where` clause alone. It also provides `guide`.
+- **Docs for users and agents** (the family's pattern, see the main repo's CLAUDE.md): `guide.md` is
+  the format for agents (cheat sheet, worked example, running it, common problems), provided by
+  `workspace.rkt` as `guide` (fhir-mcp's `learn://sql-on-fhir`); `tests/guide-test.rkt` parses every
+  ```view block strictly and checks the rows and problems the text states. `.claude/skills/sql-on-fhir`
+  is the workflow without MCP (every command in it was run). `scribblings/sql-on-fhir.scrbl` is the
+  manual; `tests/docs-test.rkt` renders it and fails on a broken reference to its own sections or
+  bindings. Writing them fixed: `run` treated only `.rkt` files as modules (the manual's `.sof` file
+  crashed reading JSON) — a file starting with `#lang` is one now, and a file that is not JSON is a
+  one-line error; a view that fails on the data (a multi-valued column) escaped `$sql-run` as a raw
+  exception (a stack trace at the CLI, a 500 over HTTP) — it is an OperationOutcome, `processing`.

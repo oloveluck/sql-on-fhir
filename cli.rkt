@@ -39,11 +39,20 @@
           [else (cons (car as) (loop (cdr as)))])))
 
 ;; ---- run ----------------------------------------------------------------------------------------
+;; read-view : path -> ViewDefinition jsexpr   a `#lang sql-on-fhir` module (whatever its extension:
+;; `.rkt`, `.sof`) by its first view, else the file as JSON; unreadable JSON is a one-line error, exit 1
 (define (read-view f)
-  (if (regexp-match? #rx"[.]rkt$" f)
-      (let ([rs (dynamic-require (path->complete-path f) 'resources)])
-        (node->jsexpr (if (list? rs) (car rs) rs)))
-      (call-with-input-file f read-json)))
+  (cond
+    [(module-file? f)
+     (let ([rs (dynamic-require (path->complete-path f) 'resources)])
+       (node->jsexpr (if (list? rs) (car rs) rs)))]
+    [else
+     (with-handlers ([exn:fail:read? (lambda (e) (eprintf "sql-on-fhir: ~a is not JSON: ~a\n" f (exn-message e)) (exit 1))])
+       (call-with-input-file f read-json))]))
+;; module-file? : path -> boolean   a `.rkt` file, or one that starts with a #lang line
+(define (module-file? f)
+  (or (regexp-match? #rx"[.]rkt$" f)
+      (regexp-match? #px"^\\s*#lang " (call-with-input-file f (lambda (in) (or (read-string 64 in) ""))))))
 (define (read-data f)
   (cond [(not f) empty-data-source]
         [(directory-exists? f) (directory->data-source f)]

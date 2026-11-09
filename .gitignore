@@ -1,1 +1,3 @@
 compiled/
+# a rendered manual (raco scribble output)
+doc/

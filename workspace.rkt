@@ -7,7 +7,7 @@
 ;;; what one resource contributes: the rows it alone produces, and whether each `where` holds for it.
 ;;; A Row is {column: value …} in the view's column order.
 
-(require racket/contract racket/list racket/string racket/match json
+(require racket/contract racket/list racket/string racket/match racket/runtime-path racket/file json
          fhir/lang/workspace
          (only-in fhir/diagnostic diagnostic loc exn:fail:diagnostic exn:fail:diagnostic? exn:fail:diagnostic-diagnostic)
          (only-in fhir/operation exn:fail:operation? exn:fail:operation-outcome)
@@ -17,7 +17,12 @@
          (only-in "view.rkt" view-columns)
          (only-in "operations.rkt" view-rows))
 
-(provide (contract-out [workspace-support ws-support?]))
+(provide (contract-out [workspace-support ws-support?]
+                       ;; guide : the language guide (guide.md) a hub serves to agents (learn://sql-on-fhir)
+                       [guide string?]))
+
+(define-runtime-path guide-file "guide.md")
+(define guide (file->string guide-file))
 
 (define (path-string p) (if (path? p) (path->string p) p))
 (define (fail path msg) (raise (exn:fail:diagnostic msg (current-continuation-marks)
