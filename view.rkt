@@ -48,7 +48,10 @@
   ;; eval-view : typed ViewDefinition node × resources -> rows (each an ordered alist)
   [eval-view    (-> fhir? (listof fhir?) (listof list?))]
   ;; view-columns : the view's column names, in declaration order
-  [view-columns (-> fhir? (listof symbol?))]))
+  [view-columns (-> fhir? (listof symbol?))]
+  ;; rewrite-sof : FHIRPath AST -> AST   getResourceKey()/getReferenceKey(Type) as plain FHIRPath (the
+  ;; workspace checks a view's paths after it, as the engine evaluates them)
+  [rewrite-sof  (-> any/c any/c)]))
 
 ;; ---- typed-node field helpers ----------------------------------------------
 ;; fld : node key -> value|#f ; flds : node key -> (Listof value) ; pv from model/leaf

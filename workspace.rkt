@@ -14,8 +14,12 @@
          (only-in fhir/data-source current-data-source data-source-all data-source-read)
          (only-in fhir/result/result ok? ok-value)
          (only-in fhir/serialize/from-json from-json)
-         (only-in "view.rkt" view-columns)
-         (only-in "operations.rkt" view-rows))
+         (only-in "view.rkt" view-columns rewrite-sof)
+         (only-in "operations.rkt" view-rows)
+         (only-in fhirpath/parser/parse parse-fhirpath)
+         (only-in fhirpath/analyze analyze)
+         (only-in fhirpath/error exn:fp?)
+         (only-in fhir/model/registry type-registered?))
 
 (provide (contract-out [workspace-support ws-support?]
                        ;; guide : the language guide (guide.md) a hub serves to agents (learn://sql-on-fhir)
@@ -45,7 +49,56 @@
   (for/fold ([rs '()] [ds '()] #:result (values (reverse rs) ds)) ([f (in-list files)])
     (with-handlers ([exn:fail:diagnostic? (lambda (e) (values rs (append ds (list (exn:fail:diagnostic-diagnostic e)))))])
       (define v (view ws (car f) (cdr f)))
-      (values (cons (if (hash-has-key? v 'id) v (hash-set v 'id (regexp-replace* #rx"[^A-Za-z0-9.-]" (file-stem (car f)) "-"))) rs) ds))))
+      (values (cons (if (hash-has-key? v 'id) v (hash-set v 'id (regexp-replace* #rx"[^A-Za-z0-9.-]" (file-stem (car f)) "-"))) rs)
+              (append ds (path-problems (car f) (cdr f) v))))))
+
+;; path-problems : path text ViewDefinition -> diagnostics   every column, forEach and where path
+;; checked against the view's resource type (FHIRPath's static analysis, not strict about choice
+;; members), each problem at the path's string in the file. Only an element the type does not have
+;; is reported ("no element Observation.effectiveDateTme (did you mean …)"): it is decided; anything
+;; the analysis cannot follow is left to run time.
+(define (path-problems file text v)
+  (define type (let ([r (hash-ref v 'resource #f)]) (and (string? r) (string->symbol r))))
+  (define (check path prefix)
+    (define full (if (null? prefix) path (string-append (string-join (reverse prefix) ".") "." path)))
+    (with-handlers ([exn:fp? (lambda (e)
+                               (if (regexp-match? #rx"no element" (exn-message e))
+                                   (list (diagnostic 'sql-on-fhir 'compile 'error
+                                                     (regexp-replace #rx"^fhirpath: " (exn-message e) "")
+                                                     (string-location file text path)))
+                                   '()))]
+                    [exn:fail? (lambda (_) '())])
+      (analyze (rewrite-sof (parse-fhirpath full)) type #:strict? #f)
+      '()))
+  (define (walk sel prefix)
+    (if (hash-ref sel 'repeat #f) '() (walk* sel prefix)))    ; repeat's paths follow each level: unchecked
+  (define (walk* sel prefix)
+    (define each (or (hash-ref sel 'forEach #f) (hash-ref sel 'forEachOrNull #f)))
+    (define inner (if (string? each) (cons each prefix) prefix))
+    (append (if (string? each) (check each prefix) '())
+            (append* (for/list ([c (in-list (hash-ref sel 'column '()))] #:when (string? (hash-ref c 'path #f)))
+                       (check (hash-ref c 'path) inner)))
+            (append* (for/list ([s (in-list (hash-ref sel 'select '()))]) (walk s inner)))
+            (append* (for/list ([s (in-list (hash-ref sel 'unionAll '()))]) (walk s inner)))))
+  (if (and type (type-registered? type))
+      (remove-duplicates
+       (append (append* (for/list ([s (in-list (hash-ref v 'select '()))]) (walk s '())))
+               (append* (for/list ([w (in-list (hash-ref v 'where '()))] #:when (string? (hash-ref w 'path #f)))
+                          (check (hash-ref w 'path) '())))))
+      '()))
+
+;; string-location : file text string -> loc   where the JSON string "<s>" first appears (the file
+;; itself when it does not)
+(define (string-location file text s)
+  (define lit (jsexpr->string s))
+  (define m (regexp-match-positions (regexp-quote lit) text))
+  (cond
+    [(not m) (loc (path-string file) #f #f #f #f)]
+    [else
+     (define pos (caar m))
+     (define line (add1 (for/sum ([c (in-string text 0 pos)]) (if (char=? c #\newline) 1 0))))
+     (define col (- pos (let loop ([i (sub1 pos)]) (cond [(< i 0) -1] [(char=? (string-ref text i) #\newline) i] [else (loop (sub1 i))]))))
+     (loc (path-string file) line col pos (string-length lit))]))
 
 (define (columns v)
   (map symbol->string (view-columns (ok-value (from-json v)))))
