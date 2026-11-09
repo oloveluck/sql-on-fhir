@@ -88,5 +88,5 @@ as procedures, over the current data source; `view-rows` gives the rows as hashe
   `forEachOrNull` to keep it with nulls, or check the `where` with `explain`.
 - A choice element: `value.ofType(Quantity).value` and `effective.ofType(dateTime)` name the member.
 - `getReferenceKey()` reads relative references (`Patient/p1`); an absolute URL gives null.
-- A view in JSON is checked for structure; a `status` outside its value set is caught only in the
-  `#lang sql-on-fhir` form.
+- `"live" is not in the required value set for ViewDefinition.status`: a code outside its value
+  set (`status`, `resource`, `fhirVersion`), in a JSON view as in the `#lang sql-on-fhir` form.

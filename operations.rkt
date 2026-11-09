@@ -27,7 +27,9 @@
          (only-in "view.rkt" eval-view view-columns)
          (only-in fhir/serialize/from-json from-json)
          (only-in fhir/result/result ok? ok-value err-error)
-         (only-in fhir/result/result validation-error-message))
+         (only-in fhir/result/result validation-error-message)
+         racket/runtime-path racket/promise (only-in fhir/package read-package)
+         (only-in fhir/model/binding binding-expansion))
 
 (provide
  (contract-out
@@ -43,10 +45,44 @@
 
 ;; ---- the view and its data ----------------------------------------------------------------------
 ;; typed-view : ViewDefinition jsexpr -> typed node   strict: the generated schema validates it
+;; and every code a required binding governs is in its value set (what the #lang form checks)
 (define (typed-view js)
   (define r (from-json (hash-set js 'resourceType "ViewDefinition")))
-  (if (ok? r) (ok-value r)
-      (operation-error "invalid" "not a valid ViewDefinition: ~a" (validation-error-message (err-error r)))))
+  (unless (ok? r)
+    (operation-error "invalid" "not a valid ViewDefinition: ~a" (validation-error-message (err-error r))))
+  (define problems (binding-problems js))
+  (when (pair? problems)
+    (operation-error "invalid" "not a valid ViewDefinition: ~a" (string-join problems "; ")))
+  (ok-value r))
+
+;; binding-problems : ViewDefinition jsexpr -> (listof string)
+;; the codes outside their required value sets. The bindings are the IG's StructureDefinition's
+;; (its snapshot, read from spec/ once); a value set without an offline expansion fails open.
+(define-runtime-path ig-package "spec/hl7.fhir.uv.sql-on-fhir.tgz")
+(define required-bindings                ; (listof (cons (listof symbol) value-set-url))
+  (delay
+    (define-values (_m resources _e)
+      (read-package ig-package #:select (lambda (n) (regexp-match? #rx"StructureDefinition-ViewDefinition[.]json$" n))))
+    (for*/list ([r (in-list resources)]
+                [e (in-list (hash-ref (hash-ref (cdr r) 'snapshot (hasheq)) 'element '()))]
+                [b (in-value (hash-ref e 'binding #f))]
+                #:when (and (hash? b) (equal? (hash-ref b 'strength #f) "required") (hash-ref b 'valueSet #f)
+                            (not (regexp-match? #rx"\\[x\\]" (hash-ref e 'path)))))
+      (cons (map string->symbol (cdr (string-split (hash-ref e 'path) ".")))
+            (car (string-split (hash-ref b 'valueSet) "|"))))))
+(define (binding-problems js)
+  (for*/list ([pb (in-list (force required-bindings))]
+              [exp (in-value (binding-expansion (cdr pb)))] #:when exp
+              [v (in-list (values-at js (car pb)))]
+              #:when (and (string? v) (not (hash-ref exp v #f))))
+    (format "~s is not in the required value set for ViewDefinition.~a (~a)"
+            v (string-join (map symbol->string (car pb)) ".") (cdr pb))))
+;; values-at : jsexpr (listof symbol) -> (listof jsexpr)   every value at a path (lists fan out)
+(define (values-at v path)
+  (cond [(list? v) (append-map (lambda (x) (values-at x path)) v)]
+        [(null? path) (list v)]
+        [(hash? v) (values-at (hash-ref v (car path) '()) (cdr path))]
+        [else '()]))
 (define (typed-resource js)
   (define r (from-json js #:lenient? #t))
   (and (ok? r) (ok-value r)))
@@ -202,6 +238,9 @@
     (check-equal? (body ($sql-run view #:_format "csv")) "id,gender\r\np1,female\r\np2,male\r\n")
     (check-equal? (body ($sql-run view #:_format "csv" #:header "false")) "p1,female\r\np2,male\r\n")
     (check-equal? (body (~> view ($sql-run))) "{\"gender\":\"female\",\"id\":\"p1\"}\n{\"gender\":\"male\",\"id\":\"p2\"}\n")
+    ;; codes outside their required value sets are refused, as the #lang form refuses them
+    (check-exn #rx"\"live\" is not in the required value set for ViewDefinition.status" (lambda () (view-rows (hash-set view 'status "live"))))
+    (check-exn #rx"\"Patiant\" is not in the required value set for ViewDefinition.resource" (lambda () (view-rows (hash-set view 'resource "Patiant"))))
     ;; by canonical, filtered, limited
     (check-equal? (body (apply-operation "$sql-run" #:subjectCanonical "http://example.org/ViewDefinition/patients"
                                          #:patient "Patient/p2" #:_format "json"))

@@ -70,5 +70,6 @@
   (define key (list (hasheq 'column (list (hasheq 'name "p" 'path "subject.getReferenceKey(Patient)")))))
   (check-equal? (view-rows (view "Observation" key) (list (hash-set panel 'subject (hasheq 'reference "http://example.org/fhir/Patient/p1"))))
                 (list (row 'p 'null)))
-  ;; JSON is checked for structure, not for the status value set
-  (check-not-exn (lambda () (view-rows (hash-set (view "Patient" (list id)) 'status "live") patients))))
+  ;; JSON is checked against the required value sets too, with the message the guide quotes
+  (check-exn (regexp (regexp-quote "\"live\" is not in the required value set for ViewDefinition.status"))
+             (lambda () (view-rows (hash-set (view "Patient" (list id)) 'status "live") patients))))

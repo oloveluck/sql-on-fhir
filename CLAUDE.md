@@ -32,3 +32,8 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
   crashed reading JSON) — a file starting with `#lang` is one now, and a file that is not JSON is a
   one-line error; a view that fails on the data (a multi-valued column) escaped `$sql-run` as a raw
   exception (a stack trace at the CLI, a 500 over HTTP) — it is an OperationOutcome, `processing`.
+  Then fixed (2026-11-09): a JSON view was not checked against its required bindings (`"status":
+  "live"` ran; the `#lang` form refused it at compile time). The runtime schema carries no binding
+  (only the form macros' field-specs do), so `operations.rkt`'s `typed-view` reads the required
+  bindings from the IG's StructureDefinition snapshot in `spec/` (once, lazily) and checks each code
+  against the generated terminology's expansion — all 144 suite views pass it.

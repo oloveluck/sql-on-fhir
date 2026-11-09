@@ -46,8 +46,8 @@ p1,2024-04-02T09:30:00Z,138
 
 A misspelled element, a wrong type or a @tt{status} outside its value set is a compile error on the
 form. The same view as JSON runs the same way (@tt{raco sql-on-fhir run readings.view.json patients/});
-JSON is checked against the generated model when it runs, so a misspelled element is refused with
-its name and exit status 1.
+JSON is checked against the generated model and the IG's required value sets when it runs, so a
+misspelled element or a @tt{status} outside its value set is refused with its name and exit status 1.
 
 @section{Writing a view}
 
@@ -122,10 +122,7 @@ SQLView Libraries); no Parquet.}
 @item{@tt{$sql-export} completes synchronously, with the results inline as Binaries: no job, polling,
 cancellation or download urls; @tt{_format=fhir} becomes ndjson.}
 @item{A column's @tt{type} and @tt{tag} are not enforced; constants must be primitives;
-@tt{getReferenceKey()} expects relative @tt{Type/id} references (an absolute url gives null).}
-@item{A view given as JSON is checked for its structure (elements, types, cardinality), not for its
-bindings: a @tt{status} outside its value set is caught only in the @hash-lang[] @tt{sql-on-fhir}
-form.}]
+@tt{getReferenceKey()} expects relative @tt{Type/id} references (an absolute url gives null).}]
 
 @section{Reference}
 
