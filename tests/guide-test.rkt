@@ -7,7 +7,8 @@
 
 (require rackunit racket/runtime-path racket/file racket/list racket/string json
          fhir/operation
-         (only-in sql-on-fhir/workspace guide)
+         (only-in sql-on-fhir/workspace guide with-unread status-problem)
+         (only-in fhir/diagnostic diagnostic-message)
          (only-in sql-on-fhir/operations view-rows $sql-run))
 
 (define-runtime-path guide-file "../guide.md")
@@ -83,13 +84,29 @@
              (lambda () (view-rows (view "Patient" (list (hasheq 'column three))) patients)))
   (check-equal? (length (view-rows (hash-remove (view "Patient" (list id)) 'status) patients)) 2)
   ;; read as R6 (this process, like the command line by default), an R4 MedicationRequest's drug is
-  ;; not found by a path valid in both versions: an empty column, no message
+  ;; not found by a path valid in both versions: an empty column, and the sentence the guide quotes
   (define r4-request (hasheq 'resourceType "MedicationRequest" 'id "m1" 'status "active" 'intent "order"
                              'medicationCodeableConcept (hasheq 'text "metformin 500 mg")))
   (define drug (list (hasheq 'column (list (hasheq 'name "drug" 'path "medication.ofType(CodeableConcept).text")))))
-  (check-equal? (view-rows (view "MedicationRequest" drug) (list r4-request)) (list (row 'drug 'null)))
+  (define (rows+unread v resources) (call-with-values (lambda () (with-unread v "R6" (lambda () (view-rows v resources)))) list))
+  (define (quoted? sentence) (regexp-match? (regexp-quote sentence) (regexp-replace* #px"\\s+" text " ")))
+  (define no-element
+    (string-append "1 of 1 MedicationRequest resources holds `medicationCodeableConcept`, which was not read: FHIR R6 has no such "
+                   "element (the first: MedicationRequest/m1); --fhir-version 4.0.1 reads the data as R4"))
+  (check-equal? (rows+unread (view "MedicationRequest" drug) (list r4-request)) (list (list (row 'drug 'null)) (list no-element)))
+  (check-true (quoted? no-element))
   ;; a value that is not valid FHIR is not read: a time with no time zone
   (define (observed at) (hash-set (hash-remove panel 'component) 'effectiveDateTime at))
   (define date (list (hasheq 'column (list (hasheq 'name "date" 'path "effective.ofType(dateTime)")))))
-  (check-equal? (view-rows (view "Observation" date) (list (observed "2021-05-31T00:00:00") (observed "2021-05-31T00:00:00Z")))
-                (list (row 'date 'null) (row 'date "2021-05-31T00:00:00Z"))))
+  (define not-valid
+    (string-append "1 of 2 Observation resources holds a value at `effectiveDateTime` that is not valid FHIR and was not read "
+                   "(the first: Observation/o1: \"2021-05-31T00:00:00\" — a time needs a time zone, such as Z or +01:00)"))
+  (check-equal? (rows+unread (view "Observation" date) (list (observed "2021-05-31T00:00:00") (observed "2021-05-31T00:00:00Z")))
+                (list (list (row 'date 'null) (row 'date "2021-05-31T00:00:00Z")) (list not-valid)))
+  (check-true (quoted? not-valid))
+  ;; a view that does not read the element is told nothing
+  (check-equal? (cadr (rows+unread (view "Observation" (list id)) (list (observed "2021-05-31T00:00:00")))) '())
+  ;; a view with no `status`: the warning the guide quotes
+  (check-equal? (diagnostic-message (status-problem "view.json" "{}" (hasheq 'resource "Patient")))
+                "no `status` (the standard requires it: \"draft\", \"active\", \"retired\" or \"unknown\")")
+  (check-true (quoted? "warning: view.json:1:1: no `status` (the standard requires it: \"draft\", \"active\", \"retired\" or \"unknown\")")))

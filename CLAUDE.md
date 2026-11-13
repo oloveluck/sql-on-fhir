@@ -55,7 +55,8 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
     where it is missing and what it is (``select[0].column[2] has no `name` (the column's name in
     the table)``; `required-words`, else the definition's `short`). `eval-view` says a missing
     `resource` itself (the harness calls it directly: the suite's three such views expect an error).
-  - **`status` is NOT held, on purpose** (`unheld-required`). The definition says 1..1 and the
+  - **`status` is NOT held, on purpose** (`unheld-required`); since 2026-11-13 a view without it
+    is told so (below). The definition says 1..1 and the
     `#lang` form requires it, but 33 of the 133 views the shared suite expects to RUN leave it out:
     requiring it in JSON would refuse views the standard's own suite runs. tck-test.rkt prints the
     count (when it reaches 0 the exception can go) and checks that `typed-view` refuses no view the
@@ -83,9 +84,35 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
     (`model/lang/reader.rkt`, from fhir's codegen) now reads forms as syntax (`read-syntax`; it used
     `read`, so a form error carried no position, or kit.rkt's own), so every form error has its line
     and column.
-  - Still silent, named in the manual's Limits and in guide.md (guide-test pins both): R4 data read
-    as R6 through a path valid in both versions (`medication.ofType(CodeableConcept)`: R6 has a
-    `medication` of another type), and a value the lenient read drops because it is not valid FHIR
-    (a dateTime with a time and no zone). `fhir/serialize/lenient`'s `lenient-drops` would name
-    both; over the eCQM patients it reports 139 of 328 resources even read as R4 (zoneless
-    dateTimes), so what to say and how often needs deciding first.
+- **What was still silent, said** (2026-11-13; `tests/cli-test.rkt`, `tests/guide-test.rkt` and the
+  modules' own tests; stdout and the exit status never change, `typed-view`/`$sql-run` accept what
+  they accepted):
+  - **No `status`** is a warning: `workspace.rkt`'s `status-problem` (a warning-severity diagnostic
+    at the view's opening brace; `text-location` is the one line/column computation) among a
+    workspace file's artifacts' problems, and `sql-on-fhir: warning: view.json:1:1: no `status`
+    (the standard requires it: "draft", "active", "retired" or "unknown")` from `run` (JSON views;
+    the `#lang` form cannot leave it out).
+  - **Data the read left out, when the view reads it.** `operations.rkt` keeps a read log when one
+    is set (`current-read-log`, `make-read-log`, `read-log-count`, `read-log-reads`): `typed-resource`
+    counts every resource and keeps each whose lenient read dropped values (`lenient-drops`; a
+    resource that does not read at all is 'unreadable). `unread.rkt` decides what concerns the view:
+    `view-chains` turns every path (columns under their forEach, where clauses, the arguments of
+    where/select/exists… under the element they test; `repeat`'s paths whole) into the elements it
+    walks — a Chain of Steps `(name . variant)`, functions left out, `ofType(T)`/`as T` narrowing
+    the last step to that choice member — and a drop is RELEVANT when its JSON path agrees with a
+    chain step by step for as long as both go (`effectiveDateTime` for `effective.ofType(dateTime)`,
+    not for `effective.ofType(Period).start`; `period.start` for `period.start` or `period`, not for
+    `period.end`). `unread-notes` groups the relevant drops by element and kind — FHIRPath's static
+    pass over the dropped path says whether the version read has the element (`no-element`: "which
+    was not read: FHIR R6 has no such element", and, read as R6 only, "--fhir-version 4.0.1 reads the
+    data as R4") or the value is not valid FHIR (`invalid`: the first value quoted, with the
+    calendar's reason from `drops-message` or "a time needs a time zone") — one sentence each,
+    counted over the resources, the first named. `workspace.rkt`'s `with-unread` runs a thunk under
+    a log and returns the sentences: `raco sql-on-fhir run` prints them as warnings (not for an
+    element a path warning already named: `unread-warnings`), a workspace run carries them as its
+    summary's `unread`. Decided by measuring: over the eCQM patients read as R4, a view of
+    Observation codes says nothing, one of `effective.ofType(dateTime)` says 12 of 47, one of
+    Encounter `period.start` 65 of 86 (and nothing of `period.end`); over the shared suite's 133
+    running views it says nothing.
+  - Not done: `view-rows`/`$sql-run` return rows alone (a caller sets `current-read-log`); the
+    value itself is never repaired.

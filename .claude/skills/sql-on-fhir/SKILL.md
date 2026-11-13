@@ -32,8 +32,9 @@ and worked example, and the common problems (that guide is what fhir-mcp serves 
    ```
    sql-on-fhir: not a valid ViewDefinition: ViewDefinition: unknown field selct (see https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/viewdefinition.html#ViewDefinition)
    ```
-   So is a view that leaves out a required element (all but `status`, which the shared suite's own
-   views omit), named where it is missing:
+   So is a view that leaves out a required element, named where it is missing (all but `status`,
+   which the shared suite's own views omit: the view runs, with ``warning: view.json:1:1: no
+   `status` (the standard requires it: …)`` on stderr):
    ```
    sql-on-fhir: not a valid ViewDefinition: select[0].column[2] has no `name` (the column's name in the table)
    ```
@@ -44,6 +45,12 @@ and worked example, and the common problems (that guide is what fhir-mcp serves 
    `forEach`):
    ```
    sql-on-fhir: meds.view.json:9:32: no element MedicationRequest.medicationCodeableConcept (the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4)
+   ```
+   An empty cell where the resource has a value is said too, when the view reads the element
+   (stdout and the exit status are unchanged; what the view does not read is not reported):
+   ```
+   sql-on-fhir: warning: 1 of 1 MedicationRequest resources holds `medicationCodeableConcept`, which was not read: FHIR R6 has no such element (the first: MedicationRequest/m1); --fhir-version 4.0.1 reads the data as R4
+   sql-on-fhir: warning: 1 of 2 Observation resources holds a value at `effectiveDateTime` that is not valid FHIR and was not read (the first: Observation/bp-1: "2021-05-31T00:00:00" — a time needs a time zone, such as Z or +01:00)
    ```
    A `#lang sql-on-fhir` file that does not compile prints its message alone (`sql-on-fhir:
    readings.sof:3:41: ViewDefinition: unknown field ViewDefinition.resorce`, the form on the next

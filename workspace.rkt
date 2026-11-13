@@ -15,7 +15,8 @@
          (only-in fhir/result/result ok? ok-value)
          (only-in fhir/serialize/from-json from-json)
          (only-in "view.rkt" view-columns rewrite-sof)
-         (only-in "operations.rkt" view-rows)
+         (only-in "operations.rkt" view-rows current-read-log make-read-log read-log-count read-log-reads)
+         (only-in "unread.rkt" unread-notes)
          (only-in fhirpath/parser/parse parse-fhirpath)
          (only-in fhirpath/analyze analyze)
          (only-in fhirpath/error exn:fp?)
@@ -25,6 +26,13 @@
                        ;; path-problems : file text view -> the view's paths that name an element its
                        ;; resource type lacks, each at its string in the text (the command line warns with it)
                        [path-problems (-> (or/c path-string? #f) string? hash? (listof diagnostic?))]
+                       ;; status-problem : file text view -> a warning when the view states no `status`
+                       ;; (the standard requires one; the view still runs), at the view's opening brace
+                       [status-problem (-> (or/c path-string? #f) string? hash? (or/c diagnostic? #f))]
+                       ;; with-unread : view version-name thunk -> (values result notes)   the thunk's
+                       ;; result, and a sentence for each element the view reads that the lenient read
+                       ;; of the data left out while it ran (unread.rkt); version-name: "R4", "R6"
+                       [with-unread (-> hash? string? (-> any) (values any/c (listof string?)))]
                        ;; guide : the language guide (guide.md) a hub serves to agents (learn://sql-on-fhir)
                        [guide string?]))
 
@@ -53,7 +61,27 @@
     (with-handlers ([exn:fail:diagnostic? (lambda (e) (values rs (append ds (list (exn:fail:diagnostic-diagnostic e)))))])
       (define v (view ws (car f) (cdr f)))
       (values (cons (if (hash-has-key? v 'id) v (hash-set v 'id (regexp-replace* #rx"[^A-Za-z0-9.-]" (file-stem (car f)) "-"))) rs)
-              (append ds (path-problems (car f) (cdr f) v))))))
+              (append ds (let ([s (status-problem (car f) (cdr f) v)]) (if s (list s) '()))
+                      (path-problems (car f) (cdr f) v))))))
+
+;; status-problem : path text ViewDefinition -> diagnostic | #f
+;; The definition requires `status` (1..1) and a view without one still runs — the shared suite's own
+;; views leave it out — so it is said, as a warning, where the view begins.
+(define status-values "\"draft\", \"active\", \"retired\" or \"unknown\"")
+(define (status-problem file text v)
+  (and (not (hash-has-key? v 'status))
+       (diagnostic 'sql-on-fhir 'compile 'warning
+                   (format "no `status` (the standard requires it: ~a)" status-values)
+                   (text-location file text (regexp-match-positions #rx"{" text)))))
+
+;; version-name : workspace -> string   the FHIR version its data is read as: "R4", "R5"
+(define (version-name ws)
+  (format "R~a" (car (string-split (ws-config-fhir-version (workspace-config ws)) "."))))
+;; with-unread : ViewDefinition version-name (-> X) -> (values X (listof string))
+(define (with-unread v version-name thunk)
+  (define log (make-read-log))
+  (define result (parameterize ([current-read-log log]) (thunk)))
+  (values result (unread-notes v (read-log-reads log) (read-log-count log) version-name)))
 
 ;; path-problems : path text ViewDefinition -> diagnostics   every column, forEach and where path
 ;; checked against the view's resource type (FHIRPath's static analysis, not strict about choice
@@ -95,15 +123,16 @@
 ;; string-location : file text string -> loc   where the JSON string "<s>" first appears (the file
 ;; itself when it does not)
 (define (string-location file text s)
-  (define lit (jsexpr->string s))
-  (define m (regexp-match-positions (regexp-quote lit) text))
+  (text-location file text (regexp-match-positions (regexp-quote (jsexpr->string s)) text)))
+;; text-location : file text match-positions|#f -> loc   the match's line and column in the text
+(define (text-location file text m)
   (cond
-    [(not m) (loc (path-string file) #f #f #f #f)]
+    [(not m) (loc (and file (path-string file)) #f #f #f #f)]
     [else
      (define pos (caar m))
      (define line (add1 (for/sum ([c (in-string text 0 pos)]) (if (char=? c #\newline) 1 0))))
      (define col (- pos (let loop ([i (sub1 pos)]) (cond [(< i 0) -1] [(char=? (string-ref text i) #\newline) i] [else (loop (sub1 i))]))))
-     (loc (path-string file) line col pos (string-length lit))]))
+     (loc (and file (path-string file)) line col pos (- (cdar m) pos))]))
 
 (define (columns v)
   (map symbol->string (view-columns (ok-value (from-json v)))))
@@ -112,10 +141,13 @@
 (define (run ws path text opts)
   (define v (view ws path text))
   (define cols (columns v))
-  (define rows (map (lambda (r) (ordered r cols)) (view-rows v)))
-  (run-result "rows" cols rows
-              (hasheq 'rows (length rows) 'resource (hash-ref v 'resource "")
-                      'scanned (length ((data-source-all (current-data-source)) (hash-ref v 'resource ""))))))
+  ;; what the view reads that the data's read left out is said with the rows (`unread`)
+  (define-values (all unread) (with-unread v (version-name ws) (lambda () (view-rows v))))
+  (define rows (map (lambda (r) (ordered r cols)) all))
+  (define summary
+    (hasheq 'rows (length rows) 'resource (hash-ref v 'resource "")
+            'scanned (length ((data-source-all (current-data-source)) (hash-ref v 'resource "")))))
+  (run-result "rows" cols rows (if (null? unread) summary (hash-set summary 'unread unread))))
 
 (define (explain ws path text subject opts)
   (define v (view ws path text))
@@ -136,7 +168,7 @@
 (define workspace-support (ws-support "sql-on-fhir" artifacts run explain))
 
 (module+ test
-  (require rackunit (only-in fhir/data-source resources->data-source) (only-in fhir/diagnostic diagnostic-loc diagnostic-message loc-line))
+  (require rackunit (only-in fhir/data-source resources->data-source) (only-in fhir/diagnostic diagnostic-loc diagnostic-message diagnostic-severity loc-line loc-column))
   (define-values (ws _) (open-workspace (find-system-path 'temp-dir)))
   (define text (jsexpr->string
                 (hasheq 'resourceType "ViewDefinition" 'name "active_patients" 'status "active" 'resource "Patient"
@@ -146,6 +178,11 @@
   (define-values (rs ds) (artifacts ws (list (cons "/tmp/active.view.json" text) (cons "/tmp/bad.view.json" "{\"resource\": 3}"))))
   (check-equal? (hash-ref (car rs) 'url) "http://example.org/workspace/ViewDefinition/active")
   (check-equal? (length ds) 1)
+  ;; a view that states no `status` is still an artifact, with a warning where it begins
+  (let-values ([(rs ds) (artifacts ws (list (cons "/tmp/nostatus.view.json" "\n {\"resource\": \"Patient\", \"select\": [{\"column\": [{\"name\": \"id\", \"path\": \"id\"}]}]}")))])
+    (check-equal? (length rs) 1)
+    (check-equal? (map (lambda (d) (list (diagnostic-severity d) (loc-line (diagnostic-loc d)) (loc-column (diagnostic-loc d)) (diagnostic-message d))) ds)
+                  '((warning 2 2 "no `status` (the standard requires it: \"draft\", \"active\", \"retired\" or \"unknown\")"))))
   (define data (list (hasheq 'resourceType "Patient" 'id "a" 'active #t 'name (list (hasheq 'family "Ng")))
                      (hasheq 'resourceType "Patient" 'id "b" 'active #f)))
   (parameterize ([current-data-source (resources->data-source data)])
@@ -153,6 +190,14 @@
     (check-equal? (run-result-columns r) '("id" "family"))
     (check-equal? (run-result-rows r) (list (hasheq 'id "a" 'family "Ng")))
     (check-equal? (hash-ref (run-result-summary r) 'scanned) 2)
+    (check-false (hash-has-key? (run-result-summary r) 'unread))
+    ;; a value the view reads that the data's read left out is named with the rows
+    (parameterize ([current-data-source (resources->data-source
+                                         (list (hasheq 'resourceType "Patient" 'id "c" 'active #t 'name (list (hasheq 'family 7)))))])
+      (define r (run ws #f text (hasheq)))
+      (check-equal? (run-result-rows r) (list (hasheq 'id "c" 'family 'null)))
+      (check-equal? (hash-ref (run-result-summary r) 'unread)
+                    '("1 of 1 Patient resources holds a value at `name.family` that is not valid FHIR and was not read (the first: Patient/c: 7)")))
     (define e (explain ws #f text "Patient/b" (hasheq)))
     (check-equal? (hash-ref e 'rows) '())
     (check-equal? (hash-ref e 'rowsWithoutWhere) 1)

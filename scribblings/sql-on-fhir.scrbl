@@ -368,13 +368,26 @@ have one; a status is @tt{active}, @tt{draft}, @tt{retired} or @tt{unknown}):
 @tt{path}, the @tt{path} of a @tt{where}. The message says where it is missing and what it is:
 @verbatim|{sql-on-fhir: not a valid ViewDefinition: the view has no `resource` (the type of resource the view reads, such as "Patient")
 sql-on-fhir: not a valid ViewDefinition: select[0].column[2] has no `name` (the column's name in the table)}|
-@tt{status} is the exception: a view without it runs (@secref["limits"]).}
+@tt{status} is the exception: a view without it runs, and a warning says it is missing
+(@secref["limits"]):
+@verbatim|{sql-on-fhir: warning: patients.view.json:1:1: no `status` (the standard requires it: "draft", "active", "retired" or "unknown")}|}
 @item{@bold{A path to an element the record type does not have}, a misspelling or an element of
 another FHIR version: refused when a column reads it from a record, as in @secref["columns"]. Where
 nothing fails, the table is printed and the problem is a warning beside it (on the error stream, so
 it does not end up in a file the table is written to). That happens when there are no records of
 the view's kind, and when the path is a @tt{forEach}, which passes over what it does not find:
 @verbatim|{sql-on-fhir: warning: meds.view.json:9:32: no element MedicationRequest.medicationCodeableConcept (the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4)}|}
+@item{@bold{An empty cell where the record has a value.} Records are read tolerantly: an element
+the FHIR version does not have, and a value that is not valid FHIR, are left out, and the cell that
+reads them is empty. When that happens to something the view reads, a warning counts the records
+and names the first. Here one of two blood pressure readings gives its date and time without a time
+zone, which FHIR does not allow:
+@verbatim|{sql-on-fhir: warning: 1 of 2 Observation resources holds a value at `effectiveDateTime` that is not valid FHIR and was not read (the first: Observation/bp-1: "2021-05-31T00:00:00" — a time needs a time zone, such as Z or +01:00)
+id,date
+bp-1,
+bp-2,2021-06-14T09:30:00Z}|
+Nothing is said about what the view does not read: a view of the same records that asks only for
+their codes gets no warning.}
 @item{@bold{A path that gives several values} for one cell: @tt{column given: path yields 2 items
 without collection=true}. Narrow the path, use @tt{forEach}, or mark the column as a collection
 (@secref["first"], step 5).}
@@ -448,8 +461,19 @@ $ raco sql-on-fhir run meds.view.json r4/ --format csv
 sql-on-fhir: meds.view.json:9:32: no element MedicationRequest.medicationCodeableConcept (the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4)
 }|
 
-One case gets no message (@secref["limits"]): a path that is right in both versions and means
-different things in them. So for R4 data, name the version.
+A path can also be right in both versions and mean different things in them. Written as
+@tt{medication.ofType(CodeableConcept).text}, the @tt{drug} column is a valid path in R6 too, where
+it finds nothing in an R4 record. The table is printed with the cell empty, and a warning says what
+was in the records and not read:
+
+@verbatim|{
+$ raco sql-on-fhir run meds-both.view.json r4/ --format csv
+sql-on-fhir: warning: 1 of 1 MedicationRequest resources holds `medicationCodeableConcept`, which was not read: FHIR R6 has no such element (the first: MedicationRequest/m1); --fhir-version 4.0.1 reads the data as R4
+patient,drug
+ann,
+}|
+
+So for R4 data, name the version.
 
 @subsection[#:tag "formats"]{Output formats, and what each is for}
 
@@ -629,13 +653,16 @@ memory, one list of rows per view. To query the result, load the CSV or NDJSON i
 spreadsheet you use, or work in a fhir-mcp workspace, where views are tables.}
 @item{@bold{The command line reads data as FHIR R6 unless told otherwise}
 (@secref["versions"]), and it does not look at the records to find out. A path to an element the
-version does not have gets a message. A path that exists in both versions with different meanings
-does not: over R4 data read as R6, @tt{medication.ofType(CodeableConcept).text} on a
-MedicationRequest is a valid path that finds nothing, so the column is empty with no message. With
-@litchar{--fhir-version 4.0.1} it finds the drug. (A fhir-mcp workspace reads data in the
-workspace's own FHIR version.)}
-@item{@bold{A value that is not valid FHIR is not read}, and its cell is empty with no message: a
-date and time written without a time zone (@tt{2021-05-31T00:00:00}) is one.}
+version does not have gets a message, and so does an element of the records that the version does
+not have, when the view reads it (@secref["versions"]). Both are warnings: the table is still
+printed, with those cells empty. (A fhir-mcp workspace reads data in the workspace's own FHIR
+version.)}
+@item{@bold{A value that is not valid FHIR is not read}, and its cell is empty: a date and time
+written without a time zone (@tt{2021-05-31T00:00:00}) is one. A warning says so when the view
+reads that element (@secref["refused"]); the value itself is not repaired.}
+@item{@bold{The warnings about data are the command line's and the workspace's.} A program that
+calls @racket[view-rows] or @tt{$sql-run} gets the rows alone, unless it sets
+@racket[current-read-log] and reads what was left out from it.}
 @item{@bold{@tt{$sql-run}} ignores the inputs @tt{parameters}, @tt{context}, @tt{group} and
 @tt{source}; a @tt{patient} that does not resolve filters to nothing; its subject is a
 ViewDefinition only (not the specification's SQLQuery or SQLView Libraries); it does not write
@@ -645,9 +672,9 @@ There is no background job, polling, cancellation or download address, and @tt{_
 becomes NDJSON.}
 @item{@bold{Columns.} A column's @tt{type} and @tt{tag} are not enforced. Constants must be simple
 values (text, numbers, true or false, dates, codes).}
-@item{@bold{@tt{status} is not asked for.} The standard requires it, and a JSON view without it
-runs all the same: 33 of the 133 views the standard's own test suite expects to run leave it out,
-so refusing them would fail that suite. Every other required part is asked for
+@item{@bold{@tt{status} is not insisted on.} The standard requires it, and a JSON view without it
+runs all the same, with a warning: 33 of the 133 views the standard's own test suite expects to run
+leave it out, so refusing them would fail that suite. Every other required part is asked for
 (@secref["refused"]), and the @hash-lang[] @tt{sql-on-fhir} form asks for @tt{status} too.}
 @item{@bold{References.} @tt{getReferenceKey()} reads relative references (@tt{Patient/ann}); an
 absolute address gives an empty cell.}]
@@ -739,6 +766,17 @@ Parameters: one @tt{output} per subject, its result a Binary.}
 Rows as hashes for a ViewDefinition given as JSON (strictly parsed); @racket[resources] default to
 the data source's.}
 @deftogether[(
+@defparam[current-read-log log (or/c #f read-log?)]
+@defproc[(make-read-log) read-log?]
+@defproc[(read-log? [v any/c]) boolean?]
+@defproc[(read-log-count [log read-log?]) exact-nonnegative-integer?]
+@defproc[(read-log-reads [log read-log?]) (listof (cons/c hash? (or/c list? 'unreadable)))])]{
+What the tolerant read of the data left out. While @racket[current-read-log] holds a log, every
+record a view reads is counted, and each one whose read dropped something is kept with what was
+dropped: a list of @racket[(list path value)], the path as in the JSON
+(@tt{period.start}, @tt{name[1].family}), or @racket['unreadable] for a record that could not be
+read at all. The default is @racket[#f]: nothing is recorded.}
+@deftogether[(
 @defproc[(rows->ndjson [rows list?]) string?]
 @defproc[(rows->json [rows list?]) string?]
 @defproc[(rows->csv [columns list?] [rows list?] [#:header? header? boolean? #t]) string?])]{The formats, over @racket[eval-view]'s rows.}
@@ -747,5 +785,16 @@ the data source's.}
 @defmodule[sql-on-fhir/workspace]
 
 @defthing[workspace-support any/c]{The @tt{fhir/lang/workspace} support fhir-mcp loads for views.}
+@defproc[(path-problems [file (or/c path-string? #f)] [text string?] [view hash?]) list?]{
+The view's column, @tt{forEach} and @tt{where} paths that name an element its record type does not
+have, each a diagnostic at the path's place in @racket[text] (the file's own text).}
+@defproc[(status-problem [file (or/c path-string? #f)] [text string?] [view hash?]) any/c]{
+A warning diagnostic when the view states no @tt{status}, at the view's opening brace; else
+@racket[#f].}
+@defproc[(with-unread [view hash?] [version-name string?] [thunk (-> any)]) (values any/c (listof string?))]{
+Calls @racket[thunk] with a read log (@racket[current-read-log]) and returns its result with one
+sentence for each element the view reads that the read of the data left out: the sentences the
+command line prints as warnings. @racket[version-name] is the FHIR version the data is read as,
+such as @racket["R4"].}
 @defthing[guide string?]{The repository's @tt{guide.md}: the format for agents (fhir-mcp's
 @tt{learn://sql-on-fhir}).}

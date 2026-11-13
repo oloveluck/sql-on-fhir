@@ -35,9 +35,12 @@
   (check-equal? (run "no-name.json")
                 (list 1 "" "sql-on-fhir: not a valid ViewDefinition: select[0].column[0] has no `name` (the column's name in the table)\n")))
 
-(test-case "a view with no `status` runs: the shared suite's own views leave it out"
+(define no-status-warning
+  "sql-on-fhir: warning: no-status.json:1:1: no `status` (the standard requires it: \"draft\", \"active\", \"retired\" or \"unknown\")\n")
+(test-case "a view with no `status` runs (the shared suite's own views leave it out), and is told so"
   (write! "no-status.json" (string-append "{\"resourceType\":\"ViewDefinition\",\"resource\":\"Patient\"," columns))
-  (check-equal? (run "no-status.json" "patients" "--format" "csv") (list 0 "id\r\np1\r\n" "")))
+  ;; the rows and the exit status are those of a view that states one; the warning is on stderr
+  (check-equal? (run "no-status.json" "patients" "--format" "csv") (list 0 "id\r\np1\r\n" no-status-warning)))
 
 ;; R4 data: a MedicationRequest names its drug in `medicationCodeableConcept`, a choice R5 replaced
 ;; with one `medication` element of another type
@@ -52,8 +55,13 @@
 
 (test-case "--fhir-version 4.0.1 reads the data as R4"
   (apply write! "meds.json" (meds "medication.ofType(CodeableConcept).text"))
-  ;; as R6 (the default) the R4 element is not read
-  (check-equal? (run "meds.json" "r4" "--format" "csv") (list 0 "id,drug\r\nm1,\r\n" ""))
+  ;; as R6 (the default) the R4 element is not read, and that is said: the path is valid in both
+  ;; versions (R6 has a `medication` of another type), so the empty column came without a word
+  (check-equal? (run "meds.json" "r4" "--format" "csv")
+                (list 0 "id,drug\r\nm1,\r\n"
+                      (string-append "sql-on-fhir: warning: 1 of 1 MedicationRequest resources holds `medicationCodeableConcept`, "
+                                     "which was not read: FHIR R6 has no such element (the first: MedicationRequest/m1); "
+                                     "--fhir-version 4.0.1 reads the data as R4\n")))
   (check-equal? (run "meds.json" "r4" "--format" "csv" "--fhir-version" "4.0.1") (list 0 "id,drug\r\nm1,metformin 500 mg\r\n" ""))
   ;; a view written as a module runs over R4 data too, and R5 is a version as well
   (write! "meds.sof" "#lang sql-on-fhir"
@@ -61,7 +69,7 @@
           " (select (ViewDefinitionSelect (column (ViewDefinitionSelectColumn (name \"drug\")"
           "   (path \"medication.ofType(CodeableConcept).text\"))))))")
   (check-equal? (run "meds.sof" "r4" "--format" "csv" "--fhir-version" "4.0.1") (list 0 "drug\r\nmetformin 500 mg\r\n" ""))
-  (check-equal? (run "no-status.json" "patients" "--format" "csv" "--fhir-version" "5.0.0") (list 0 "id\r\np1\r\n" ""))
+  (check-equal? (run "no-status.json" "patients" "--format" "csv" "--fhir-version" "5.0.0") (list 0 "id\r\np1\r\n" no-status-warning))
   ;; a version there is no tower for is a usage error
   (define unknown (run "meds.json" "r4" "--fhir-version" "3.0.2"))
   (check-equal? (car unknown) 2)
@@ -91,6 +99,27 @@
   (apply write! "typo.json" (meds "statuss"))
   (check-equal? (caddr (run "typo.json" "--fhir-version" "4.0.1"))
                 "sql-on-fhir: warning: typo.json:3:26: no element MedicationRequest.statuss (did you mean `status`?) (the data is read as FHIR R4)\n"))
+
+(test-case "a value the view reads that the read left out is said, once for the data; what it does not read is not"
+  ;; a dateTime with a time and no zone is not valid FHIR: the lenient read drops it, in any version
+  (make-directory (build-path dir "encounters"))
+  (for ([id (in-list '("e1" "e2" "e3"))] [start (in-list '("2019-01-01T08:00:00" "2019-01-02T08:00:00" "2019-01-03T08:00:00Z"))])
+    (write! (format "encounters/~a.json" id)
+            (format "{\"resourceType\":\"Encounter\",\"id\":~s,\"status\":\"finished\",\"class\":{\"code\":\"AMB\"}," id)
+            (format " \"period\":{\"start\":~s,\"end\":\"2019-01-04T09:00:00Z\"}}" start)))
+  (define (encounters path)
+    (list "{\"resourceType\":\"ViewDefinition\",\"status\":\"active\",\"resource\":\"Encounter\","
+          (format " \"select\":[{\"column\":[{\"name\":\"id\",\"path\":\"id\"},{\"name\":\"at\",\"path\":~s}]}]}" path)))
+  (apply write! "starts.json" (encounters "period.start"))
+  (check-equal? (run "starts.json" "encounters" "--format" "csv" "--fhir-version" "4.0.1")
+                (list 0 "id,at\r\ne1,\r\ne2,\r\ne3,2019-01-03T08:00:00Z\r\n"
+                      (string-append "sql-on-fhir: warning: 2 of 3 Encounter resources hold a value at `period.start` that is not valid FHIR "
+                                     "and was not read (the first: Encounter/e1: \"2019-01-01T08:00:00\" — a time needs a time zone, "
+                                     "such as Z or +01:00)\n")))
+  ;; a view that reads another element of the same period is told nothing: its table lacks nothing
+  (apply write! "ends.json" (encounters "period.end"))
+  (check-equal? (run "ends.json" "encounters" "--format" "csv" "--fhir-version" "4.0.1")
+                (list 0 "id,at\r\ne1,2019-01-04T09:00:00Z\r\ne2,2019-01-04T09:00:00Z\r\ne3,2019-01-04T09:00:00Z\r\n" "")))
 
 (test-case "a #lang sql-on-fhir file that does not compile: the error's message at its line, exit 1"
   (write! "bad.sof" "#lang sql-on-fhir"

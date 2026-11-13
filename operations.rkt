@@ -29,13 +29,23 @@
          (only-in fhir/result/result ok? ok-value err-error)
          (only-in fhir/result/result validation-error-message)
          racket/runtime-path racket/promise (only-in fhir/package read-package)
-         (only-in fhir/model/binding binding-expansion))
+         (only-in fhir/model/binding binding-expansion)
+         (only-in fhir/serialize/lenient lenient-drops))
 
 (provide
  (contract-out
   ;; the IG's two operations as fhir/operation values ($sql-run's subject is the ViewDefinition)
   [$sql-run operation?]
   [$sql-export operation?]
+  ;; what the lenient read of the data left out, for a caller that wants to say so: while
+  ;; `current-read-log` holds a log (`make-read-log`), every resource a view reads is counted
+  ;; (`read-log-count`) and each one whose read dropped values is kept with them (`read-log-reads`:
+  ;; (cons resource drops), drops a list of fhir/serialize/lenient Drops, or 'unreadable)
+  [current-read-log (parameter/c (or/c #f read-log?))]
+  [make-read-log (-> read-log?)]
+  [read-log? (-> any/c boolean?)]
+  [read-log-count (-> read-log? exact-nonnegative-integer?)]
+  [read-log-reads (-> read-log? (listof (cons/c hash? (or/c list? 'unreadable))))]
   ;; a ViewDefinition over the data source (or the resources given) -> its rows, each a hash column -> value
   [view-rows (->* (hash?) ((or/c #f (listof hash?))) (listof hash?))]
   ;; the output formats over eval-view's rows (a Row is an ordered (listof (cons column jsexpr)))
@@ -140,9 +150,23 @@
         [(null? path) (list v)]
         [(hash? v) (values-at (hash-ref v (car path) '()) (cdr path))]
         [else '()]))
+;; typed-resource : resource jsexpr -> typed node | #f   read leniently: an element the tower lacks
+;; and a value that does not parse are left out, and noted in the read log when there is one
 (define (typed-resource js)
   (define r (from-json js #:lenient? #t))
-  (and (ok? r) (ok-value r)))
+  (define node (and (ok? r) (ok-value r)))
+  (define log (current-read-log))
+  (when log
+    (set-read-log-count! log (add1 (read-log-count log)))
+    (define drops (if node (lenient-drops js node) 'unreadable))
+    (unless (null? drops) (set-read-log-entries! log (cons (cons js drops) (read-log-entries log)))))
+  node)
+;; A ReadLog is (read-log count entries): how many resources were read, and the Reads that lost
+;; something, newest first.
+(struct read-log (count entries) #:mutable)
+(define (make-read-log) (read-log 0 '()))
+(define (read-log-reads log) (reverse (read-log-entries log)))
+(define current-read-log (make-parameter #f))
 
 ;; the view named by the inputs: inline (the subject), by canonical, or by reference
 (define (subject-view in)
@@ -312,6 +336,12 @@
     (check-exn #rx"where\\[0\\] has no `path`" (lambda () (view-rows (hash-set view 'where (list (hasheq))))))
     (check-exn #rx"constant\\[0\\] has no `value\\[x\\]`" (lambda () (view-rows (hash-set view 'constant (list (hasheq 'name "c"))))))
     (check-not-exn (lambda () (view-rows (hash-set view 'constant (list (hasheq 'name "c" 'valueString "x"))))))
+    ;; the read log: what the lenient read left out of each resource, counted over those read
+    (let ([log (make-read-log)]
+          [odd (hasheq 'resourceType "Patient" 'id "p3" 'gender "female" 'birthDate "1990-02-30")])
+      (check-equal? (length (parameterize ([current-read-log log]) (view-rows view (append pts (list odd))))) 3)
+      (check-equal? (read-log-count log) 3)
+      (check-equal? (read-log-reads log) (list (cons odd '(("birthDate" "1990-02-30"))))))
     ;; `status` is required too and is not held: the shared suite's own views leave it out
     (check-equal? (length (view-rows (hash-remove view 'status))) 2)
     ;; by canonical, filtered, limited

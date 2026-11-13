@@ -67,7 +67,9 @@ A view that is not a ViewDefinition (a misspelled element, a wrong type, a requi
 out) is refused before it runs, with the reason and exit status 1; so is a view that fails on the
 data, and a `#lang sql-on-fhir` file that does not compile (its message, no stack trace). A path to
 an element the resource type lacks in the FHIR version read is said at its line and column: the
-refusal when a column reads it from a resource, else a `warning:` on stderr beside the table.
+refusal when a column reads it from a resource, else a `warning:` on stderr beside the table. Two
+more warnings come beside the table (stdout and the exit status are unchanged): a JSON view that
+states no `status`, and data the view reads that the read left out (below).
 
 **As a module.** A file that starts with `#lang sql-on-fhir` writes the view in forms generated from
 the IG, so a misspelled element or a `status` outside its value set is a compile error. It provides
@@ -97,12 +99,22 @@ as procedures, over the current data source; `view-rows` gives the rows as hashe
 - ``the view has no `resource` (the type of resource the view reads, such as "Patient")``,
   ``select[0].column[2] has no `name` ``: a required element is missing, named where. Held:
   `resource`, `select`, a column's `name` and `path`, a `where`'s `path`, a constant's `name` and
-  value. Not held in JSON: `status` (the shared suite's own views leave it out); write it anyway,
-  the `#lang` form requires it.
+  value. Not refused in JSON: `status` (the shared suite's own views leave it out). The view runs
+  with ``warning: view.json:1:1: no `status` (the standard requires it: "draft", "active", "retired"
+  or "unknown")``, on the command line and as a warning of the workspace file; the `#lang` form
+  requires it.
 - `no element MedicationRequest.medicationCodeableConcept (the data is read as FHIR R6; --fhir-version
   4.0.1 reads it as R4)`: the command line reads data as R6 unless `--fhir-version` says `4.0.1` or
-  `5.0.0` (a workspace reads it in the workspace's version). For R4 data, name the version: a path
-  valid in both versions with different meanings (`medication.ofType(CodeableConcept)` on a
-  MedicationRequest) gives an empty column under R6 with no message.
-- An empty cell where the resource has a value: a value that is not valid FHIR is not read (a
-  dateTime with a time and no time zone, `2021-05-31T00:00:00`).
+  `5.0.0` (a workspace reads it in the workspace's version). For R4 data, name the version.
+- ``1 of 1 MedicationRequest resources holds `medicationCodeableConcept`, which was not read: FHIR R6
+  has no such element (the first: MedicationRequest/m1); --fhir-version 4.0.1 reads the data as R4``:
+  a path valid in both versions with different meanings (`medication.ofType(CodeableConcept)` on a
+  MedicationRequest) finds nothing in R4 data read as R6. The column is empty and the warning says
+  what the resources held.
+- ``1 of 2 Observation resources holds a value at `effectiveDateTime` that is not valid FHIR and was
+  not read (the first: Observation/o1: "2021-05-31T00:00:00" — a time needs a time zone, such as Z or
+  +01:00)``: an empty cell where the resource has a value. Resources are read leniently, and a value
+  that is not valid FHIR is left out. Only what the view's paths read is reported (a dropped
+  `period.start` is nothing to a view that reads `period.end`), once per element, counted over the
+  resources. In a workspace the same sentences are the run's `unread`. `view-rows` and `$sql-run`
+  return the rows alone; set `current-read-log` (sql-on-fhir/operations) to collect the drops.

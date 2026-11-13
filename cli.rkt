@@ -6,7 +6,9 @@
 ;;;       run a ViewDefinition ($sql-run) over FHIR data: a directory of JSON files, a Bundle or a
 ;;;       resource; the view as JSON or a #lang sql-on-fhir module. The data is read as FHIR R6 (the
 ;;;       version the view model is built over) unless --fhir-version names another; a path to an
-;;;       element the resource type lacks in that version is a warning on stderr.
+;;;       element the resource type lacks in that version is a warning on stderr; so are a view that
+;;;       states no `status`, and data the view reads that the read left out (an element that
+;;;       version does not have, a value that is not valid FHIR).
 ;;;   raco sql-on-fhir tck [-v]        the shared test suite (FHIR/sql-on-fhir.js tests, vendored)
 ;;;   raco sql-on-fhir regen | check   regenerate the model from spec/ | verify it is up to date
 ;;;   raco sql-on-fhir fetch [--version V] [--tests-commit SHA]
@@ -122,6 +124,28 @@
                   (diagnostic-message d) version-name
                   (if (equal? version-name "R6") "; --fhir-version 4.0.1 reads it as R4" "")))))
 
+;; status-warnings : path ViewDefinition -> (listof Warning)   a JSON view that states no `status`:
+;; the standard requires one, and the view runs all the same (the shared suite's own views do)
+(define (status-warnings f view)
+  (define d ((dynamic-require workspace-module 'status-problem) f (file->string f) view))
+  (define l (and d (diagnostic-loc d)))
+  (if d
+      (list (cons (diagnostic-message d)
+                  (format "~a~a: ~a" f (if (and l (loc-line l)) (format ":~a:~a" (loc-line l) (loc-column l)) "")
+                          (diagnostic-message d))))
+      '()))
+
+;; unread-warnings : (listof string) (listof Warning) ViewDefinition -> (listof Warning)
+;; what the view reads that the data's read left out (workspace.rkt's `with-unread`), without the
+;; elements a path warning has already named as missing from the version read
+(define (unread-warnings notes path-warnings view)
+  (for/list ([n (in-list notes)]
+             #:unless (for/or ([w (in-list path-warnings)])
+                        (let ([m (regexp-match #rx"^no element ([A-Za-z0-9]+)[.]([A-Za-z0-9_]+)" (car w))])
+                          (and m (equal? (cadr m) (hash-ref view 'resource #f))
+                               (regexp-match? (regexp (string-append "`" (regexp-quote (caddr m)) "[.`]")) n)))))
+    (cons n n)))
+
 (define (cmd-run args)
   (define ps (positional args))
   (when (null? ps) (usage-error "sql-on-fhir" usages "run"))
@@ -133,10 +157,13 @@
   (load-tower! (caddr version))
   (define $sql-run (dynamic-require operations-module '$sql-run))
   (define view (read-view (car ps)))
-  (define warnings (path-warnings (car ps) view (cadr version)))
+  (define with-unread (dynamic-require workspace-module 'with-unread))
+  (define paths (path-warnings (car ps) view (cadr version)))
+  (define warnings (append (if (module-file? (car ps)) '() (status-warnings (car ps) view)) paths))
   (define (warn! ws) (for ([w (in-list ws)]) (eprintf "sql-on-fhir: warning: ~a\n" (cdr w))))
-  (define result
+  (define-values (result unread)
     (parameterize ([current-data-source (read-data (and (pair? (cdr ps)) (cadr ps)))])
+     (with-unread view (cadr version) (lambda ()
       (with-handlers ([exn:fail:operation?
                        (lambda (e)
                          ;; a failure the static check foresaw is said once, at its place in the file
@@ -146,8 +173,8 @@
                          (when (null? foreseen) (fail "~a" (exn-message e)))
                          (for ([w (in-list foreseen)]) (eprintf "sql-on-fhir: ~a\n" (cdr w)))
                          (exit 1))])
-        ($sql-run view #:_format (opt args "--format" "ndjson")))))
-  (warn! warnings)
+        ($sql-run view #:_format (opt args "--format" "ndjson")))))))
+  (warn! (append warnings (unread-warnings unread paths view)))
   (if (equal? (hash-ref result 'resourceType) "Binary")
       (void (write-bytes (base64-decode (string->bytes/utf-8 (hash-ref result 'data)))))
       (displayln (jsexpr->string result))))
