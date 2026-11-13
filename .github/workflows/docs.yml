@@ -38,7 +38,7 @@ jobs:
           raco test view.rkt operations.rkt tests/tck-test.rkt
       - name: Build the documentation
         run: |
-          raco scribble +m --html --dest site --dest-name index.html --redirect-main https://docs.racket-lang.org/ scribblings/sql-on-fhir.scrbl
+          raco scribble +m --html --dest site --dest-name index.html --redirect-main https://docs.racket-lang.org/ ++style scribblings/manual.css scribblings/sql-on-fhir.scrbl
       # Publish: the built site goes to the gh-pages branch, which GitHub serves as the Pages site
       # (enabled automatically for a public repository; otherwise choose "Deploy from a branch:
       # gh-pages" once under Settings > Pages).

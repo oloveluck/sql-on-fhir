@@ -1,4 +1,7 @@
 #lang scribble/manual
+@; Text in @tt is shown exactly as written: no curly quotes, and "--" stays two hyphens.
+@(require (only-in scribble/core [element literal-element]))
+@(define (tt . text) (literal-element (quote tt) text))
 @(require (for-label racket/base racket/contract sql-on-fhir/view sql-on-fhir/operations sql-on-fhir/workspace))
 
 @; a path shown inline, with its single quotes kept straight (plain @tt would curl them)
