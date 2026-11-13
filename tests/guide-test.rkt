@@ -72,4 +72,24 @@
                 (list (row 'p 'null)))
   ;; JSON is checked against the required value sets too, with the message the guide quotes
   (check-exn (regexp (regexp-quote "\"live\" is not in the required value set for ViewDefinition.status"))
-             (lambda () (view-rows (hash-set (view "Patient" (list id)) 'status "live") patients))))
+             (lambda () (view-rows (hash-set (view "Patient" (list id)) 'status "live") patients)))
+  ;; a required element left out is named where it is missing, in the words the guide quotes;
+  ;; `status` is the one not held
+  (check-true (regexp-match? (regexp-quote "the view has no `resource` (the type of resource the view reads, such as \"Patient\")") text))
+  (check-exn (regexp (regexp-quote "the view has no `resource` (the type of resource the view reads, such as \"Patient\")"))
+             (lambda () (view-rows (hash-remove (view "Patient" (list id)) 'resource) patients)))
+  (define three (list (hasheq 'name "id" 'path "id") (hasheq 'name "gender" 'path "gender") (hasheq 'path "birthDate")))
+  (check-exn (regexp (regexp-quote "select[0].column[2] has no `name` "))
+             (lambda () (view-rows (view "Patient" (list (hasheq 'column three))) patients)))
+  (check-equal? (length (view-rows (hash-remove (view "Patient" (list id)) 'status) patients)) 2)
+  ;; read as R6 (this process, like the command line by default), an R4 MedicationRequest's drug is
+  ;; not found by a path valid in both versions: an empty column, no message
+  (define r4-request (hasheq 'resourceType "MedicationRequest" 'id "m1" 'status "active" 'intent "order"
+                             'medicationCodeableConcept (hasheq 'text "metformin 500 mg")))
+  (define drug (list (hasheq 'column (list (hasheq 'name "drug" 'path "medication.ofType(CodeableConcept).text")))))
+  (check-equal? (view-rows (view "MedicationRequest" drug) (list r4-request)) (list (row 'drug 'null)))
+  ;; a value that is not valid FHIR is not read: a time with no time zone
+  (define (observed at) (hash-set (hash-remove panel 'component) 'effectiveDateTime at))
+  (define date (list (hasheq 'column (list (hasheq 'name "date" 'path "effective.ofType(dateTime)")))))
+  (check-equal? (view-rows (view "Observation" date) (list (observed "2021-05-31T00:00:00") (observed "2021-05-31T00:00:00Z")))
+                (list (row 'date 'null) (row 'date "2021-05-31T00:00:00Z"))))

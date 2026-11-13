@@ -9,7 +9,7 @@
 
 (require racket/contract racket/list racket/string racket/match racket/runtime-path racket/file json
          fhir/lang/workspace
-         (only-in fhir/diagnostic diagnostic loc exn:fail:diagnostic exn:fail:diagnostic? exn:fail:diagnostic-diagnostic)
+         (only-in fhir/diagnostic diagnostic diagnostic? loc exn:fail:diagnostic exn:fail:diagnostic? exn:fail:diagnostic-diagnostic)
          (only-in fhir/operation exn:fail:operation? exn:fail:operation-outcome)
          (only-in fhir/data-source current-data-source data-source-all data-source-read)
          (only-in fhir/result/result ok? ok-value)
@@ -22,6 +22,9 @@
          (only-in fhir/model/registry type-registered?))
 
 (provide (contract-out [workspace-support ws-support?]
+                       ;; path-problems : file text view -> the view's paths that name an element its
+                       ;; resource type lacks, each at its string in the text (the command line warns with it)
+                       [path-problems (-> (or/c path-string? #f) string? hash? (listof diagnostic?))]
                        ;; guide : the language guide (guide.md) a hub serves to agents (learn://sql-on-fhir)
                        [guide string?]))
 
@@ -75,11 +78,13 @@
   (define (walk* sel prefix)
     (define each (or (hash-ref sel 'forEach #f) (hash-ref sel 'forEachOrNull #f)))
     (define inner (if (string? each) (cons each prefix) prefix))
-    (append (if (string? each) (check each prefix) '())
-            (append* (for/list ([c (in-list (hash-ref sel 'column '()))] #:when (string? (hash-ref c 'path #f)))
-                       (check (hash-ref c 'path) inner)))
-            (append* (for/list ([s (in-list (hash-ref sel 'select '()))]) (walk s inner)))
-            (append* (for/list ([s (in-list (hash-ref sel 'unionAll '()))]) (walk s inner)))))
+    (define each-problems (if (string? each) (check each prefix) '()))
+    (if (pair? each-problems)
+        each-problems                       ; what is inside a forEach that names no element only repeats it
+        (append (append* (for/list ([c (in-list (hash-ref sel 'column '()))] #:when (string? (hash-ref c 'path #f)))
+                           (check (hash-ref c 'path) inner)))
+                (append* (for/list ([s (in-list (hash-ref sel 'select '()))]) (walk s inner)))
+                (append* (for/list ([s (in-list (hash-ref sel 'unionAll '()))]) (walk s inner))))))
   (if (and type (type-registered? type))
       (remove-duplicates
        (append (append* (for/list ([s (in-list (hash-ref v 'select '()))]) (walk s '())))
@@ -163,4 +168,13 @@
   (check-equal? (sort (map (lambda (d) (list (loc-line (diagnostic-loc d)) (diagnostic-message d))) tds)
                       < #:key car)
                 '((2 "no element Patient.activ (did you mean `active`?)")
-                  (4 "no element HumanName.famly (did you mean `family`?)"))))
+                  (4 "no element HumanName.famly (did you mean `family`?)")))
+  ;; a forEach over an element the type lacks is ONE problem, at the forEach: the columns inside it
+  ;; are not each blamed for it
+  (define each (string-append
+                "{\"resource\": \"Patient\", \"status\": \"active\",\n"
+                " \"select\": [{\"forEach\": \"nmae\",\n"
+                "   \"column\": [{\"name\": \"f\", \"path\": \"family\"}, {\"name\": \"g\", \"path\": \"given.first()\"}]}]}"))
+  (check-equal? (map (lambda (d) (list (loc-line (diagnostic-loc d)) (diagnostic-message d)))
+                     (path-problems "/tmp/each.view.json" each (string->jsexpr each)))
+                '((2 "no element Patient.nmae (did you mean `name`?)"))))

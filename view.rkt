@@ -63,7 +63,8 @@
 (define (eval-view view resources)
   (define consts (constants-env view))
   (define wheres (for/list ([w (in-list (flds view 'where))]) (parse-path (pstr w 'path))))
-  (define rtype (string->symbol (pstr view 'resource)))
+  (define rtype (string->symbol (or (pstr view 'resource)
+                                    (error 'eval-view "the view has no `resource` (the type of resource it reads)"))))
   (define sels (flds view 'select))
   (append*
    (for/list ([r (in-list resources)]
@@ -271,4 +272,9 @@
                                                  'column (list (hasheq 'name "family" 'path "family")))))))
   (check-equal? (eval-view view (list pt))
                 '(((id . "p1") (family . "Chalmers")) ((id . "p1") (family . "Windsor"))))
-  (check-equal? (view-columns view) '(id family)))
+  (check-equal? (view-columns view) '(id family))
+  ;; a view that names no resource type says so (it was `string->symbol: contract violation`)
+  (check-exn #rx"eval-view: the view has no `resource`"
+             (lambda () (eval-view (mk (hasheq 'resourceType "ViewDefinition" 'status "active"
+                                               'select (list (hasheq 'column (list (hasheq 'name "id" 'path "id"))))))
+                                   (list pt)))))

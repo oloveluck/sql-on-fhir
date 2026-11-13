@@ -23,12 +23,31 @@ and worked example, and the common problems (that guide is what fhir-mcp serves 
    ```
    `--format` is `ndjson` (the default), `json`, `csv` or `fhir` (a Parameters of rows). A
    `#lang sql-on-fhir` module runs the same way, whatever its extension (`run readings.sof data/`).
+   The data is read as FHIR R6 unless `--fhir-version 4.0.1` (R4) or `5.0.0` says otherwise; for R4
+   data, say so (R4's `medicationCodeableConcept` is not an element of R6):
+   ```
+   raco sql-on-fhir run meds.view.json r4/ --format csv --fhir-version 4.0.1
+   ```
 2. **Read the refusal.** A view the model does not accept is refused before it runs, exit 1:
    ```
    sql-on-fhir: not a valid ViewDefinition: ViewDefinition: unknown field selct (see https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/viewdefinition.html#ViewDefinition)
    ```
+   So is a view that leaves out a required element (all but `status`, which the shared suite's own
+   views omit), named where it is missing:
+   ```
+   sql-on-fhir: not a valid ViewDefinition: select[0].column[2] has no `name` (the column's name in the table)
+   ```
    A view that fails on the data is refused the same way:
-   `sql-on-fhir: column codes: path yields 2 items without collection=true`.
+   `sql-on-fhir: column codes: path yields 2 items without collection=true`. A path to an element
+   the type lacks in the version read is said at its line and column — the refusal when a column
+   reads it from a resource, a `warning:` on stderr when nothing fails (no resources of the type, a
+   `forEach`):
+   ```
+   sql-on-fhir: meds.view.json:9:32: no element MedicationRequest.medicationCodeableConcept (the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4)
+   ```
+   A `#lang sql-on-fhir` file that does not compile prints its message alone (`sql-on-fhir:
+   readings.sof:3:41: ViewDefinition: unknown field ViewDefinition.resorce`, the form on the next
+   lines), exit 1.
 3. **Narrow it down.** Too few rows: a `where` that is false, or a `forEach` over an element some
    resources lack (`forEachOrNull` keeps them). Check one path at a time with FHIRPath
    (`raco fhirpath '<path>' resource.json`, the fhirpath skill), or run a view with just that column.
@@ -60,4 +79,5 @@ A `#lang sql-on-fhir` module provides `resources` (typed views) and `(->json)`:
 suite (144/144, the floor; `-v` also prints each failure). `model/` is GENERATED from the IG package in
 `spec/`: never edit it — `raco sql-on-fhir regen` rewrites it, `raco sql-on-fhir check` verifies it
 ("the model is up to date with spec/"), and `raco sql-on-fhir fetch [--version V] [--tests-commit SHA]`
-refreshes the package and the suite. `tests/guide-test.rkt` keeps guide.md's examples true.
+refreshes the package and the suite. `tests/guide-test.rkt` keeps guide.md's examples true;
+`tests/cli-test.rkt` runs the command itself (messages, warnings, exit statuses, `--fhir-version`).

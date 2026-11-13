@@ -6,6 +6,7 @@
 |---|---|---|
 | The shared SQL on FHIR test suite (from FHIR/sql-on-fhir.js, `tests/vendor/sql-on-fhir-tests`) | each test's view over its resources gives its expected rows (as a multiset, columns in order where the test says so); a view the test calls invalid is rejected | 144/144 |
 | The guide (`tests/guide-test.rkt`) | every view in guide.md parses strictly; the worked example and cheat sheet give the rows the text states; the common problems behave as written | passes |
+| The command line (`tests/cli-test.rkt`) | `raco sql-on-fhir run` in a process of its own: a view missing a required element, R4 data read with `--fhir-version 4.0.1`, the warning for a path to an element the version lacks, a `#lang sql-on-fhir` file that does not compile — the text on stdout and stderr and the exit status | passes |
 | The manual (`tests/docs-test.rkt`) | scribblings/sql-on-fhir.scrbl renders with no broken reference to its own sections or bindings | passes |
 | The generated model | the files under `model/` equal a fresh generation from `spec/` | `raco sql-on-fhir check` |
 

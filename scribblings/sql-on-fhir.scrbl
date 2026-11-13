@@ -137,11 +137,14 @@ path gives every value, so you often finish with something that picks one:
 @item{@path{telecom.where(system = 'phone').value.first()}: both together.}]
 
 A path that finds nothing gives an empty cell (@tt{null} in JSON), not an error. A path that names
-an element the record type does not have is refused, with the name you probably meant:
+an element the record type does not have is refused, at its line and column in the file and with
+the name you probably meant:
 
 @verbatim|{
-sql-on-fhir: fhirpath: no element Patient.gendr (did you mean `gender`?)
+sql-on-fhir: patients.view.json:10:34: no element Patient.gendr (did you mean `gender`?) (the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4)
 }|
+
+The end of the message says which version of FHIR the records are read as (@secref["versions"]).
 
 Some FHIR elements can hold one of several types, and are written with the type in their name: an
 Observation's value is @tt{valueQuantity} or @tt{valueString}, its time @tt{effectiveDateTime} or
@@ -361,6 +364,17 @@ problem is one line, and the command exits with status 1.
 @item{@bold{A value outside the allowed list} (@tt{status}, @tt{resource} and @tt{fhirVersion} each
 have one; a status is @tt{active}, @tt{draft}, @tt{retired} or @tt{unknown}):
 @verbatim{sql-on-fhir: not a valid ViewDefinition: "live" is not in the required value set for ViewDefinition.status (http://hl7.org/fhir/ValueSet/publication-status)}}
+@item{@bold{A required part left out}: @tt{resource}, @tt{select}, a column's @tt{name} or
+@tt{path}, the @tt{path} of a @tt{where}. The message says where it is missing and what it is:
+@verbatim|{sql-on-fhir: not a valid ViewDefinition: the view has no `resource` (the type of resource the view reads, such as "Patient")
+sql-on-fhir: not a valid ViewDefinition: select[0].column[2] has no `name` (the column's name in the table)}|
+@tt{status} is the exception: a view without it runs (@secref["limits"]).}
+@item{@bold{A path to an element the record type does not have}, a misspelling or an element of
+another FHIR version: refused when a column reads it from a record, as in @secref["columns"]. Where
+nothing fails, the table is printed and the problem is a warning beside it (on the error stream, so
+it does not end up in a file the table is written to). That happens when there are no records of
+the view's kind, and when the path is a @tt{forEach}, which passes over what it does not find:
+@verbatim|{sql-on-fhir: warning: meds.view.json:9:32: no element MedicationRequest.medicationCodeableConcept (the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4)}|}
 @item{@bold{A path that gives several values} for one cell: @tt{column given: path yields 2 items
 without collection=true}. Narrow the path, use @tt{forEach}, or mark the column as a collection
 (@secref["first"], step 5).}
@@ -377,7 +391,7 @@ reading stopped.}]
 The command you will use is @tt{run}. The others are for people working on the package itself.
 
 @tabular[#:style 'boxed #:sep @hspace[2]
-(list (list @tt{raco sql-on-fhir run view.json data/ [--format ndjson|json|csv|fhir]} @elem{a view (JSON, or a @hash-lang[] @tt{sql-on-fhir} module of any extension) over a directory, Bundle or resource})
+(list (list @tt{raco sql-on-fhir run view.json data/ [--format ndjson|json|csv|fhir] [--fhir-version 4.0.1|5.0.0|6.0.0]} @elem{a view (JSON, or a @hash-lang[] @tt{sql-on-fhir} module of any extension) over a directory, Bundle or resource})
       (list @tt{raco sql-on-fhir tck [-v]} @elem{the shared test suite, with its report; @tt{-v} prints each failure})
       (list @tt{raco sql-on-fhir regen} @elem{regenerate the ViewDefinition model from the specification's package in @tt{spec/}})
       (list @tt{raco sql-on-fhir check} "verify the generated model is current")
@@ -388,9 +402,54 @@ single file holding a @italic{Bundle}, which is FHIR's envelope for many records
 single file holding one record. Only the records of the view's @tt{resource} kind are read; the
 rest are ignored. With no data at all, you get the heading and no rows.
 
-Exit status: 0 when the table was printed; 1 when the view was refused, a file was not JSON, or the
-view failed on the data (each one line with the reason), and when the test suite regresses; 2 when
-the command was called wrongly, such as with a file that does not exist.
+Exit status: 0 when the table was printed; 1 when the view was refused, a file was not JSON, a
+@hash-lang[] @tt{sql-on-fhir} file did not compile, or the view failed on the data (each the reason
+alone, with no trace of the program behind it), and when the test suite regresses; 2 when the
+command was called wrongly, such as with a file that does not exist or a FHIR version it does not
+read.
+
+@subsection[#:tag "versions"]{Which FHIR version the data is read as}
+
+FHIR comes in versions: R4 (4.0.1), R5 (5.0.0) and R6. Most elements are the same in all of them,
+and records that use only those read the same whichever version is named; every other example in
+this manual is like that. @tt{run} reads records as R6 unless @litchar{--fhir-version} says
+@tt{4.0.1} or @tt{5.0.0}.
+
+It matters when a view reads an element one version has and another does not. An R4
+MedicationRequest names its drug in @tt{medicationCodeableConcept}; R5 replaced that with an
+element called @tt{medication}, of another type. Here is one such R4 record, @tt{r4/m1.json}, and a
+view over it, @tt{meds.view.json}:
+
+@verbatim|{{"resourceType": "MedicationRequest", "id": "m1", "status": "active", "intent": "order",
+ "medicationCodeableConcept": {"text": "metformin 500 mg"},
+ "subject": {"reference": "Patient/ann"}}
+
+{
+  "resourceType": "ViewDefinition",
+  "name": "meds",
+  "status": "active",
+  "resource": "MedicationRequest",
+  "select": [
+    {"column": [
+      {"name": "patient", "path": "subject.getReferenceKey(Patient)"},
+      {"name": "drug", "path": "medicationCodeableConcept.text"}]}
+  ]
+}}|
+
+Read as R4, the drug is there. Read as R6, the element does not exist, and the message says so and
+names the option:
+
+@verbatim|{
+$ raco sql-on-fhir run meds.view.json r4/ --format csv --fhir-version 4.0.1
+patient,drug
+ann,metformin 500 mg
+
+$ raco sql-on-fhir run meds.view.json r4/ --format csv
+sql-on-fhir: meds.view.json:9:32: no element MedicationRequest.medicationCodeableConcept (the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4)
+}|
+
+One case gets no message (@secref["limits"]): a path that is right in both versions and means
+different things in them. So for R4 data, name the version.
 
 @subsection[#:tag "formats"]{Output formats, and what each is for}
 
@@ -456,15 +515,22 @@ The forms are the specification's elements, in the form syntax of the family's @
 language: @tt{ViewDefinition}; @tt{ViewDefinitionWhere}; @tt{ViewDefinitionSelect} (with
 @tt{column}, a nested @tt{select}, @tt{forEach}, @tt{forEachOrNull}, @tt{repeat}, @tt{unionAll});
 @tt{ViewDefinitionSelectColumn} (@tt{path}, @tt{name}, @tt{description}, @tt{collection},
-@tt{type}, @tt{tag}); and @tt{ViewDefinitionConstant}. A mistake names the form:
+@tt{type}, @tt{tag}); and @tt{ViewDefinitionConstant}. A mistake stops the file from compiling.
+@tt{run} prints the message, which says where the mistake is (file, line and column) and names the
+form, and exits with status 1:
 
-@verbatim{
-ViewDefinition: unknown field ViewDefinition.resorce
+@verbatim|{
+$ raco sql-on-fhir run readings.sof data/
+sql-on-fhir: readings.sof:3:41: ViewDefinition: unknown field ViewDefinition.resorce
   at: resorce
   in: (resorce "Observation")
 
-ViewDefinition: "live" is not in the required value set for ViewDefinition.status (http://hl7.org/fhir/ValueSet/publication-status); valid codes: (active draft retired unknown)
-}
+$ raco sql-on-fhir run readings.sof data/
+sql-on-fhir: readings.sof:3:30: ViewDefinition: "live" is not in the required value set for ViewDefinition.status (http://hl7.org/fhir/ValueSet/publication-status); valid codes: (active draft retired unknown)
+  in: "live"
+}|
+
+Unlike a JSON view, this form also refuses a view that leaves out @tt{status}.
 
 The repository's @tt{examples/patient-demographics.rkt} is a view written this way.
 
@@ -555,16 +621,21 @@ workflow for an agent using the command line.}
 @item{@bold{In an editor.} The family's language server does not cover views. A JSON view is
 checked when it runs; a @hash-lang[] @tt{sql-on-fhir} file is checked when it compiles.}]
 
-@section{Limits}
+@section[#:tag "limits"]{Limits}
 
 @itemlist[
 @item{@bold{No database.} The command makes the table; it does not run SQL. Views are evaluated in
 memory, one list of rows per view. To query the result, load the CSV or NDJSON into the database or
 spreadsheet you use, or work in a fhir-mcp workspace, where views are tables.}
-@item{@bold{The command line reads data as FHIR R6.} Most elements have the same name in R4, R5 and
-R6, and such data reads as it is. An element that R6 renamed or removed is not read, and its column
-is empty with no message: R4's @tt{medicationCodeableConcept} on a MedicationRequest is one. (A
-fhir-mcp workspace reads data in the workspace's own FHIR version.)}
+@item{@bold{The command line reads data as FHIR R6 unless told otherwise}
+(@secref["versions"]), and it does not look at the records to find out. A path to an element the
+version does not have gets a message. A path that exists in both versions with different meanings
+does not: over R4 data read as R6, @tt{medication.ofType(CodeableConcept).text} on a
+MedicationRequest is a valid path that finds nothing, so the column is empty with no message. With
+@litchar{--fhir-version 4.0.1} it finds the drug. (A fhir-mcp workspace reads data in the
+workspace's own FHIR version.)}
+@item{@bold{A value that is not valid FHIR is not read}, and its cell is empty with no message: a
+date and time written without a time zone (@tt{2021-05-31T00:00:00}) is one.}
 @item{@bold{@tt{$sql-run}} ignores the inputs @tt{parameters}, @tt{context}, @tt{group} and
 @tt{source}; a @tt{patient} that does not resolve filters to nothing; its subject is a
 ViewDefinition only (not the specification's SQLQuery or SQLView Libraries); it does not write
@@ -574,14 +645,12 @@ There is no background job, polling, cancellation or download address, and @tt{_
 becomes NDJSON.}
 @item{@bold{Columns.} A column's @tt{type} and @tt{tag} are not enforced. Constants must be simple
 values (text, numbers, true or false, dates, codes).}
-@item{@bold{Missing elements.} The check catches a misspelt element and a value outside its allowed
-list. It does not notice a required element that is absent: a view without @tt{status} runs, and a
-view without @tt{resource} fails with a message about the program's internals.}
+@item{@bold{@tt{status} is not asked for.} The standard requires it, and a JSON view without it
+runs all the same: 33 of the 133 views the standard's own test suite expects to run leave it out,
+so refusing them would fail that suite. Every other required part is asked for
+(@secref["refused"]), and the @hash-lang[] @tt{sql-on-fhir} form asks for @tt{status} too.}
 @item{@bold{References.} @tt{getReferenceKey()} reads relative references (@tt{Patient/ann}); an
-absolute address gives an empty cell.}
-@item{@bold{Module errors at the command line.} When a @hash-lang[] @tt{sql-on-fhir} file does not
-compile, @tt{run} prints Racket's own error with its context lines, not the one-line form a JSON
-view gets.}]
+absolute address gives an empty cell.}]
 
 @section[#:tag "words"]{Words used here}
 
@@ -589,6 +658,8 @@ view gets.}]
 @item{@bold{FHIR}: the health-care standard for records exchanged between systems.
 @bold{Resource}: one record of a given kind (a Patient, an Observation), written as JSON.}
 @item{@bold{Bundle}: one FHIR file that holds many resources.}
+@item{@bold{R4}, @bold{R5}, @bold{R6}: versions of FHIR (4.0.1, 5.0.0, and 6.0.0 as it stands in ballot).
+A few elements differ between them.}
 @item{@bold{ViewDefinition}, or @bold{view}: the JSON file that describes a table over one kind of
 resource: its filters and its columns.}
 @item{@bold{Column}: a name and a path; @bold{row}: one line of the table, for one resource or one
@@ -625,7 +696,9 @@ tests give the expected rows, and every view the suite calls invalid is refused.
 3.0.0-ballot), not written by hand, so what a view may contain is what the standard says.
 @tt{raco sql-on-fhir check} verifies the generated files are current.}
 @item{Every view in the repository's @tt{guide.md} is checked by the tests, and its examples give
-the rows the text states. This manual is rendered by a test that fails on a broken reference.}]
+the rows the text states. This manual is rendered by a test that fails on a broken reference.}
+@item{The command is run by a test as you would run it, which checks what it prints and its exit
+status: the refusals and warnings quoted in this manual, and R4 data read as R4.}]
 
 @tt{raco test .} in the repository runs all of it. The repository's @tt{TESTING.md} says where the
 suite and the package come from and how to run each check. Both are copied into the repository

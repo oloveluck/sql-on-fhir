@@ -44,27 +44,34 @@
   [rows->json (-> list? string?)]))
 
 ;; ---- the view and its data ----------------------------------------------------------------------
-;; typed-view : ViewDefinition jsexpr -> typed node   strict: the generated schema validates it
-;; and every code a required binding governs is in its value set (what the #lang form checks)
+;; typed-view : ViewDefinition jsexpr -> typed node   strict: the generated schema validates it,
+;; every element the definition requires is there (but `status`, below) and every code a required
+;; binding governs is in its value set (what the #lang form checks)
 (define (typed-view js)
   (define r (from-json (hash-set js 'resourceType "ViewDefinition")))
   (unless (ok? r)
     (operation-error "invalid" "not a valid ViewDefinition: ~a" (validation-error-message (err-error r))))
-  (define problems (binding-problems js))
+  (define problems (append (required-problems js) (binding-problems js)))
   (when (pair? problems)
     (operation-error "invalid" "not a valid ViewDefinition: ~a" (string-join problems "; ")))
   (ok-value r))
 
-;; binding-problems : ViewDefinition jsexpr -> (listof string)
-;; the codes outside their required value sets. The bindings are the IG's StructureDefinition's
-;; (its snapshot, read from spec/ once); a value set without an offline expansion fails open.
+;; The definition of a ViewDefinition is the IG's StructureDefinition: its snapshot's elements, read
+;; from spec/ once. An Element is the snapshot's JSON for one element (path, min, binding,
+;; contentReference).
 (define-runtime-path ig-package "spec/hl7.fhir.uv.sql-on-fhir.tgz")
-(define required-bindings                ; (listof (cons (listof symbol) value-set-url))
+(define definition-elements               ; (listof Element)
   (delay
     (define-values (_m resources _e)
       (read-package ig-package #:select (lambda (n) (regexp-match? #rx"StructureDefinition-ViewDefinition[.]json$" n))))
-    (for*/list ([r (in-list resources)]
-                [e (in-list (hash-ref (hash-ref (cdr r) 'snapshot (hasheq)) 'element '()))]
+    (append* (for/list ([r (in-list resources)]) (hash-ref (hash-ref (cdr r) 'snapshot (hasheq)) 'element '())))))
+
+;; binding-problems : ViewDefinition jsexpr -> (listof string)
+;; the codes outside their required value sets (the definition's bindings); a value set without an
+;; offline expansion fails open.
+(define required-bindings                ; (listof (cons (listof symbol) value-set-url))
+  (delay
+    (for*/list ([e (in-list (force definition-elements))]
                 [b (in-value (hash-ref e 'binding #f))]
                 #:when (and (hash? b) (equal? (hash-ref b 'strength #f) "required") (hash-ref b 'valueSet #f)
                             (not (regexp-match? #rx"\\[x\\]" (hash-ref e 'path)))))
@@ -77,6 +84,56 @@
               #:when (and (string? v) (not (hash-ref exp v #f))))
     (format "~s is not in the required value set for ViewDefinition.~a (~a)"
             v (string-join (map symbol->string (car pb)) ".") (cdr pb))))
+
+;; required-problems : ViewDefinition jsexpr -> (listof string)
+;; the elements the definition requires (min 1 or more) that the view lacks, each named where it is
+;; missing (`select[0].column[1]`) with what it is. The strict parse cannot say so: it reads the
+;; elements that are there. Structural recursion over the view's JSON beside the definition: a
+;; contentReference continues at the element it names (a nested select is a select), a choice
+;; (`value[x]`) is there when any of its members is.
+(define (required-problems js)
+  (let absent ([obj js] [def "ViewDefinition"] [shown #f])
+    (append*
+     (for/list ([e (in-list (definition-children def))])
+       (define name (last (string-split (hash-ref e 'path) ".")))
+       (define value (member-value obj name))
+       (define items (cond [(memq value '(#f null)) '()] [(list? value) value] [else (list value)]))
+       (cond
+         [(pair? items)
+          (define below (cond [(hash-ref e 'contentReference #f) => (lambda (ref) (cadr (regexp-match #rx"#(.*)$" ref)))]
+                              [else (hash-ref e 'path)]))
+          (append* (for/list ([item (in-list items)] [i (in-naturals)] #:when (hash? item))
+                     (absent item below (format "~a~a~a" (if shown (string-append shown ".") "") name
+                                                (if (list? value) (format "[~a]" i) "")))))]
+         [(and (>= (hash-ref e 'min 0) 1) (not (member (hash-ref e 'path) unheld-required)))
+          (list (format "~a has no `~a` (~a)" (or shown "the view") name
+                        (hash-ref required-words (hash-ref e 'path) (lambda () (hash-ref e 'short "required")))))]
+         [else '()])))))
+;; `status` is required by the definition (1..1) and NOT held: 33 of the 133 views the shared suite
+;; expects to run leave it out, so refusing a view without it would refuse the suite's own
+;; (tests/tck-test.rkt counts them).
+(define unheld-required '("ViewDefinition.status"))
+;; what a required element is, in the words of someone writing a view (else the definition's `short`)
+(define required-words
+  (hash "ViewDefinition.resource" "the type of resource the view reads, such as \"Patient\""
+        "ViewDefinition.select" "the columns of the table"
+        "ViewDefinition.select.column.name" "the column's name in the table"
+        "ViewDefinition.select.column.path" "the FHIRPath expression that gives the column's value"
+        "ViewDefinition.where.path" "the FHIRPath condition a resource must meet"
+        "ViewDefinition.constant.name" "the name paths call it by, as %name"
+        "ViewDefinition.constant.value[x]" "its value, such as valueString"))
+;; definition-children : definition path -> (listof Element)   the elements one step below it
+(define (definition-children def)
+  (define prefix (string-append def "."))
+  (for/list ([e (in-list (force definition-elements))]
+             #:when (let ([p (hash-ref e 'path)])
+                      (and (string-prefix? p prefix) (not (regexp-match? #rx"[.]" p (string-length prefix))))))
+    e))
+;; member-value : object element-name -> jsexpr | #f   the element's value; of a choice, its first member's
+(define (member-value obj name)
+  (cond [(regexp-match #rx"^(.*)\\[x\\]$" name)
+         => (lambda (m) (for/first ([(k v) (in-hash obj)] #:when (string-prefix? (symbol->string k) (cadr m))) v))]
+        [else (hash-ref obj (string->symbol name) #f)]))
 ;; values-at : jsexpr (listof symbol) -> (listof jsexpr)   every value at a path (lists fan out)
 (define (values-at v path)
   (cond [(list? v) (append-map (lambda (x) (values-at x path)) v)]
@@ -241,6 +298,22 @@
     ;; codes outside their required value sets are refused, as the #lang form refuses them
     (check-exn #rx"\"live\" is not in the required value set for ViewDefinition.status" (lambda () (view-rows (hash-set view 'status "live"))))
     (check-exn #rx"\"Patiant\" is not in the required value set for ViewDefinition.resource" (lambda () (view-rows (hash-set view 'resource "Patiant"))))
+    ;; an element the definition requires and the view lacks is refused, named where it is missing:
+    ;; an OperationOutcome from $sql-run, not `string->symbol: contract violation`
+    (check-exn (lambda (e) (and (exn:fail:operation? e)
+                                (equal? (exn-message e)
+                                        "not a valid ViewDefinition: the view has no `resource` (the type of resource the view reads, such as \"Patient\")")))
+               (lambda () ($sql-run (hash-remove view 'resource))))
+    (define (with-columns . cs) (hash-set view 'select (list (hasheq 'column cs) (hasheq 'select (list (hasheq 'column cs))))))
+    (check-exn #rx"select\\[0\\].column\\[1\\] has no `name` [(]the column's name in the table[)]; select\\[1\\].select\\[0\\].column\\[1\\] has no `name`"
+               (lambda () (view-rows (with-columns (hasheq 'name "id" 'path "id") (hasheq 'path "gender")))))
+    (check-exn #rx"select\\[0\\].column\\[0\\] has no `path`" (lambda () (view-rows (with-columns (hasheq 'name "id")))))
+    (check-exn #rx"the view has no `select` [(]the columns of the table[)]" (lambda () (view-rows (hash-remove view 'select))))
+    (check-exn #rx"where\\[0\\] has no `path`" (lambda () (view-rows (hash-set view 'where (list (hasheq))))))
+    (check-exn #rx"constant\\[0\\] has no `value\\[x\\]`" (lambda () (view-rows (hash-set view 'constant (list (hasheq 'name "c"))))))
+    (check-not-exn (lambda () (view-rows (hash-set view 'constant (list (hasheq 'name "c" 'valueString "x"))))))
+    ;; `status` is required too and is not held: the shared suite's own views leave it out
+    (check-equal? (length (view-rows (hash-remove view 'status))) 2)
     ;; by canonical, filtered, limited
     (check-equal? (body (apply-operation "$sql-run" #:subjectCanonical "http://example.org/ViewDefinition/patients"
                                          #:patient "Patient/p2" #:_format "json"))

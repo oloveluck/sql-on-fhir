@@ -61,9 +61,13 @@ p2,male,1990-03-01
 sql-on-fhir run patients.view.json data/ --format csv   # a directory of resources, a Bundle, or one resource
 sql-on-fhir run patients.view.json bundle.json          # NDJSON, the default; also json, fhir
 sql-on-fhir run readings.sof data/                      # a #lang sql-on-fhir module, whatever its extension
+sql-on-fhir run meds.view.json r4/ --fhir-version 4.0.1 # read the data as R4 (or 5.0.0); R6 is the default
 ```
-A view that is not a ViewDefinition (a misspelled element, a wrong type) is refused before it runs,
-with the reason and exit status 1; so is a view that fails on the data.
+A view that is not a ViewDefinition (a misspelled element, a wrong type, a required element left
+out) is refused before it runs, with the reason and exit status 1; so is a view that fails on the
+data, and a `#lang sql-on-fhir` file that does not compile (its message, no stack trace). A path to
+an element the resource type lacks in the FHIR version read is said at its line and column: the
+refusal when a column reads it from a resource, else a `warning:` on stderr beside the table.
 
 **As a module.** A file that starts with `#lang sql-on-fhir` writes the view in forms generated from
 the IG, so a misspelled element or a `status` outside its value set is a compile error. It provides
@@ -90,3 +94,15 @@ as procedures, over the current data source; `view-rows` gives the rows as hashe
 - `getReferenceKey()` reads relative references (`Patient/p1`); an absolute URL gives null.
 - `"live" is not in the required value set for ViewDefinition.status`: a code outside its value
   set (`status`, `resource`, `fhirVersion`), in a JSON view as in the `#lang sql-on-fhir` form.
+- ``the view has no `resource` (the type of resource the view reads, such as "Patient")``,
+  ``select[0].column[2] has no `name` ``: a required element is missing, named where. Held:
+  `resource`, `select`, a column's `name` and `path`, a `where`'s `path`, a constant's `name` and
+  value. Not held in JSON: `status` (the shared suite's own views leave it out); write it anyway,
+  the `#lang` form requires it.
+- `no element MedicationRequest.medicationCodeableConcept (the data is read as FHIR R6; --fhir-version
+  4.0.1 reads it as R4)`: the command line reads data as R6 unless `--fhir-version` says `4.0.1` or
+  `5.0.0` (a workspace reads it in the workspace's version). For R4 data, name the version: a path
+  valid in both versions with different meanings (`medication.ofType(CodeableConcept)` on a
+  MedicationRequest) gives an empty column under R6 with no message.
+- An empty cell where the resource has a value: a value that is not valid FHIR is not read (a
+  dateTime with a time and no time zone, `2021-05-31T00:00:00`).
