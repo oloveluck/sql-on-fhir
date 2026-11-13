@@ -1,128 +1,633 @@
 #lang scribble/manual
 @(require (for-label racket/base racket/contract sql-on-fhir/view sql-on-fhir/operations sql-on-fhir/workspace))
 
+@; a path shown inline, with its single quotes kept straight (plain @tt would curl them)
+@(define (path . strs) (tt (literal (apply string-append strs))))
+
 @title{sql-on-fhir: SQL on FHIR}
 
-@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR}, run over FHIR data. You write a
-ViewDefinition, a flat table over one resource type with a FHIRPath per column, as JSON (a
-@tt{*.view.json} file, the specification's own form) or as @hash-lang[] @tt{sql-on-fhir} forms in a
-@tt{.sof} file; @tt{raco sql-on-fhir run} evaluates it over a directory of resources and prints rows. The
-ViewDefinition model is generated from HL7's published package, so a view is checked against the
-IG's own model when it compiles, and the IG's @tt{$sql-run} and @tt{$sql-export} operations are
-provided. The shared test suite passes, 144 of 144. Part of the
-@hyperlink["https://github.com/oloveluck/fhir"]{fhir} family.
+A FHIR record is a nested document. A patient holds a list of names, and each name a list of given
+names; a blood pressure reading holds two measurements inside it. That shape suits passing records
+between systems. It does not suit counting them: a spreadsheet, a database or a statistics package
+wants a @italic{table}, where every row has the same columns and every cell holds one value.
+
+@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR} is the standard for
+getting from one to the other. You write a @italic{ViewDefinition}: a short JSON file that says
+which kind of record you want, which columns the table has, and where in the record each column's
+value is found. The same file works in any tool that follows the standard.
+
+This package runs a ViewDefinition over your FHIR data and prints the table, as CSV for a
+spreadsheet or as JSON for a program. A mistake in the view is reported before anything runs.
+
+Part of the @hyperlink["https://oloveluck.github.io/fhir/"]{fhir} family of FHIR languages and tools.
 
 @table-of-contents[]
 
-@section{Quick start}
+@section{What you can do with it}
 
-@bold{1. Install.} The packages are not on the Racket package server yet; clone the repositories
-side by side and install from source:
+@itemlist[
+@item{@bold{Turn a folder of FHIR records into a table}: @secref["first"].}
+@item{@bold{Get one row per record, or one row per repeated item} inside it, such as each phone
+number or each measurement: @secref["rows"].}
+@item{@bold{Keep only the records you want}: @secref["where"].}
+@item{@bold{Make tables that join}, a table of readings and a table of patients sharing a patient
+id: @secref["keys"].}
+@item{@bold{Choose the output} for what reads it next, a spreadsheet, a database loader or another
+FHIR system: @secref["formats"].}
+@item{@bold{Use a view from a program}, as rows in Racket or as a FHIR operation over HTTP:
+@secref["racket"] and @secref["operation"].}]
+
+@section[#:tag "first"]{A first example}
+
+@bold{1. Install} the tools as the @hyperlink["https://oloveluck.github.io/fhir/"]{family's front
+page} describes. The command is then @tt{raco sql-on-fhir} (or @tt{sql-on-fhir}, if you built the
+standalone tools).
+
+@bold{2. Have some records.} The data is a folder of FHIR resources as JSON files, one record to a
+file. Here it is two patients in @tt{data/}. Ann has two given names and two phone numbers; Bob has
+one given name and no phone.
+
+@verbatim|{{"resourceType": "Patient", "id": "ann", "gender": "female", "birthDate": "1974-12-25",
+ "name": [{"family": "Lee", "given": ["Ann", "Marie"]}],
+ "telecom": [{"system": "phone", "value": "555-0100", "use": "home"},
+             {"system": "phone", "value": "555-0101", "use": "work"}]}
+
+{"resourceType": "Patient", "id": "bob", "gender": "male", "birthDate": "1990-03-01",
+ "name": [{"family": "Ortiz", "given": ["Bob"]}]}}|
+
+@bold{3. Write a view}, @tt{patients.view.json}:
+
+@verbatim|{{
+  "resourceType": "ViewDefinition",
+  "name": "patients",
+  "status": "active",
+  "resource": "Patient",
+  "select": [
+    {"column": [
+      {"name": "id", "path": "getResourceKey()"},
+      {"name": "family", "path": "name.family.first()"},
+      {"name": "gender", "path": "gender"},
+      {"name": "birth_date", "path": "birthDate"}]}
+  ]
+}}|
+
+Reading it from the top:
+
+@itemlist[
+@item{@tt{resourceType} says this file is a ViewDefinition. @tt{name} is the table's name.
+@tt{status} is required by the standard; write @tt{"active"}.}
+@item{@tt{resource} is the kind of record the table is made from. Every Patient in the data becomes
+a row; records of other kinds are passed over.}
+@item{@tt{select} holds the columns. Each column has a @tt{name}, the heading it gets in the table,
+and a @tt{path}, which says where its value is in the record.}
+@item{A path is written in @italic{FHIRPath}, the small language FHIR uses to point into a record.
+@tt{gender} is the record's @tt{gender}. @tt{name.family.first()} goes into the names, takes each
+one's family name, and keeps the first. @tt{getResourceKey()} is the record's id.}]
+
+@bold{4. Run it} over the folder:
 
 @verbatim{
-raco pkg install --link --auto fhir/fhir fhir/fhir-spec fhirpath sql-on-fhir
+$ raco sql-on-fhir run patients.view.json data/ --format csv
+id,family,gender,birth_date
+ann,Lee,female,1974-12-25
+bob,Ortiz,male,1990-03-01
 }
 
-@bold{2. Write a view.}
+One heading line, then one row for each patient, with the columns in the order the view lists them.
+@litchar{--format csv} asks for comma-separated text, which a spreadsheet opens directly. The other
+formats are in @secref["formats"].
+
+@bold{5. Make a mistake.} Add a column for the given name, with the path @tt{name.given}. Ann has
+two given names, and a cell holds one value, so the view is refused:
+
+@verbatim{
+$ raco sql-on-fhir run given.view.json data/ --format csv
+sql-on-fhir: column given: path yields 2 items without collection=true
+}
+
+This is the central difficulty of flattening, and there are three ways out. Take one value
+(@tt{name.given.first()}). Ask for a row per value (@secref["rows"]). Or say the cell may hold a
+list, by adding @tt{"collection": true} to the column:
+
+@verbatim|{
+$ raco sql-on-fhir run given2.view.json data/
+{"given":["Ann","Marie"],"id":"ann"}
+{"given":["Bob"],"id":"bob"}
+}|
+
+@section{Writing a view}
+
+A view picks a kind of record, optionally filters it, and lists columns. This section takes those
+one idea at a time. The format itself is defined by the
+@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR specification}; the paths
+are @hyperlink["http://hl7.org/fhirpath/N1/"]{FHIRPath}.
+
+@subsection[#:tag "columns"]{A column is a path}
+
+A column's @tt{path} starts at the record and walks inward, one element name after another, with
+dots between: @tt{birthDate}, @tt{name.family}, @tt{code.coding.code}. Where an element repeats, the
+path gives every value, so you often finish with something that picks one:
+
+@itemlist[
+@item{@tt{name.family.first()}: the first of them.}
+@item{@path{name.where(use = 'official').family}: only from the names that match a condition.}
+@item{@path{telecom.where(system = 'phone').value.first()}: both together.}]
+
+A path that finds nothing gives an empty cell (@tt{null} in JSON), not an error. A path that names
+an element the record type does not have is refused, with the name you probably meant:
+
+@verbatim|{
+sql-on-fhir: fhirpath: no element Patient.gendr (did you mean `gender`?)
+}|
+
+Some FHIR elements can hold one of several types, and are written with the type in their name: an
+Observation's value is @tt{valueQuantity} or @tt{valueString}, its time @tt{effectiveDateTime} or
+@tt{effectivePeriod}. In a path you write the plain name and then say which type you mean:
+@tt{value.ofType(Quantity).value} is the number of a quantity, @tt{effective.ofType(dateTime)} a
+single moment.
+
+A column may also carry a @tt{description}, a @tt{type} and @tt{tag}s. They are kept in the view
+for other tools and do not change the rows here.
+
+@subsection[#:tag "rows"]{One row per record, or one per repeated item}
+
+By default a view gives one row for each record. To get a row for each @italic{item} of a repeating
+element instead (each phone number, each measurement in a panel), put those columns in a part of
+the @tt{select} that says @tt{forEach}. This is @tt{phones.view.json}:
+
+@verbatim|{{
+  "resourceType": "ViewDefinition",
+  "name": "phones",
+  "status": "active",
+  "resource": "Patient",
+  "select": [
+    {"column": [{"name": "id", "path": "getResourceKey()"}]},
+    {"forEach": "telecom.where(system = 'phone')", "column": [
+      {"name": "use", "path": "use"},
+      {"name": "number", "path": "value"}]}
+  ]
+}}|
+
+@verbatim{
+$ raco sql-on-fhir run phones.view.json data/ --format csv
+id,use,number
+ann,home,555-0100
+ann,work,555-0101
+}
+
+The @tt{select} now has two parts. The first has the columns that are about the whole record. The
+second has a @tt{forEach} path, and its columns' paths start at each item that path finds, not at
+the record: @tt{use} here is the phone's @tt{use}. The parts are combined, so each phone's row
+also carries the patient's @tt{id}.
+
+Bob is missing: he has no phone, so there is no item to make a row from. When you want every record
+to appear at least once, write @tt{forEachOrNull} in place of @tt{forEach}. A record with no items
+then gets one row with those cells empty:
+
+@verbatim{
+$ raco sql-on-fhir run phones-all.view.json data/ --format csv
+id,use,number
+ann,home,555-0100
+ann,work,555-0101
+bob,,
+}
+
+A part of a @tt{select} may contain a @tt{select} of its own, for a list inside a list (each given
+name of each name). Inside a @tt{forEach}, @tt{%rowIndex} is the item's position, counted from 0.
+
+@subsection[#:tag "where"]{Keeping only some records}
+
+A @tt{where} is a filter: a path that is true or false for a record. Only the records for which it
+is true make rows. This view lists the women:
+
+@verbatim|{{
+  "resourceType": "ViewDefinition",
+  "name": "women",
+  "status": "active",
+  "resource": "Patient",
+  "where": [{"path": "gender = 'female'"}],
+  "select": [
+    {"column": [
+      {"name": "id", "path": "getResourceKey()"},
+      {"name": "birth_date", "path": "birthDate"}]}
+  ]
+}}|
+
+@verbatim{
+$ raco sql-on-fhir run women.view.json data/ --format csv
+id,birth_date
+ann,1974-12-25
+}
+
+Text is written in single quotes. When @tt{where} lists several paths, a record must pass all of
+them. A path that finds nothing counts as false. A path that gives something other than true or
+false is a mistake in the view and is refused:
+
+@verbatim{
+sql-on-fhir: where path must resolve to a boolean, got (Ann Marie)
+}
+
+The usual filter on clinical records is by code: "only the blood pressure readings" is
+@path{code.coding.exists(system = 'http://loinc.org' and code = '85354-9')}, as in the next example.
+
+@subsection[#:tag "keys"]{Keys: tables that join}
+
+Records point at one another: a reading names the patient it belongs to. Two functions, which exist
+only in view paths, turn those links into values two tables share. @tt{getResourceKey()} is a
+record's own id. @tt{getReferenceKey(Patient)} is the id of the patient a link names. So a table of
+readings and a table of patients can be joined on them.
+
+Here are two blood pressure readings for Ann. Each is one Observation with two @tt{component}s, the
+systolic and the diastolic pressure, each with its own code:
+
+@verbatim|{{"resourceType": "Observation", "id": "bp-1", "status": "final",
+ "code": {"coding": [{"system": "http://loinc.org", "code": "85354-9"}]},
+ "subject": {"reference": "Patient/ann"}, "effectiveDateTime": "2024-03-01T09:00:00Z",
+ "component": [
+   {"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+    "valueQuantity": {"value": 152, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}},
+   {"code": {"coding": [{"system": "http://loinc.org", "code": "8462-4"}]},
+    "valueQuantity": {"value": 95, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}}]}}|
+
+The second, @tt{bp-2}, is a month later with 138 over 88. This view, @tt{bp.view.json}, makes a row
+for each measurement:
+
+@verbatim|{{
+  "resourceType": "ViewDefinition",
+  "name": "bp_readings",
+  "status": "active",
+  "resource": "Observation",
+  "where": [{"path": "code.coding.exists(system = 'http://loinc.org' and code = '85354-9')"}],
+  "select": [
+    {"column": [
+      {"name": "id", "path": "getResourceKey()"},
+      {"name": "patient", "path": "subject.getReferenceKey(Patient)"},
+      {"name": "date", "path": "effective.ofType(dateTime)"}]},
+    {"forEach": "component", "column": [
+      {"name": "code", "path": "code.coding.code.first()"},
+      {"name": "value", "path": "value.ofType(Quantity).value"}]}
+  ]
+}}|
+
+@verbatim{
+$ raco sql-on-fhir run bp.view.json data/ --format csv
+id,patient,date,code,value
+bp-1,ann,2024-03-01T09:00:00Z,8480-6,152
+bp-1,ann,2024-03-01T09:00:00Z,8462-4,95
+bp-2,ann,2024-04-02T09:30:00Z,8480-6,138
+bp-2,ann,2024-04-02T09:30:00Z,8462-4,88
+}
+
+The @tt{patient} column holds @tt{ann}, the same value as the @tt{id} column of the patients table
+in @secref["first"]. @tt{getReferenceKey} reads links written the usual short way
+(@tt{Patient/ann}); a link written as a full web address gives an empty cell.
+
+@subsection{Naming a value once}
+
+When the same code or text appears in several paths, give it a name under @tt{constant} and use it
+as @tt{%name}. This view puts the two pressures side by side, one row per reading:
+
+@verbatim|{{
+  "resourceType": "ViewDefinition",
+  "name": "bp_wide",
+  "status": "active",
+  "resource": "Observation",
+  "constant": [{"name": "systolic", "valueCode": "8480-6"}, {"name": "diastolic", "valueCode": "8462-4"}],
+  "where": [{"path": "code.coding.exists(system = 'http://loinc.org' and code = '85354-9')"}],
+  "select": [
+    {"column": [
+      {"name": "patient", "path": "subject.getReferenceKey(Patient)"},
+      {"name": "date", "path": "effective.ofType(dateTime)"},
+      {"name": "systolic", "path": "component.where(code.coding.code = %systolic).value.ofType(Quantity).value"},
+      {"name": "diastolic", "path": "component.where(code.coding.code = %diastolic).value.ofType(Quantity).value"}]}
+  ]
+}}|
+
+@verbatim{
+$ raco sql-on-fhir run bp-wide.view.json data/ --format csv
+patient,date,systolic,diastolic
+ann,2024-03-01T09:00:00Z,152,95
+ann,2024-04-02T09:30:00Z,138,88
+}
+
+A constant's value is written with its type, as FHIR does: @tt{valueCode}, @tt{valueString},
+@tt{valueInteger}, @tt{valueBoolean} and so on.
+
+@subsection{Stacking rows, and lists inside lists}
+
+Two more words cover the shapes that are left.
+
+@tt{unionAll} stacks the rows of several alternatives that have the same columns. This view lists
+each patient's phones and then their names, in one table:
+
+@verbatim|{"select": [
+  {"column": [{"name": "id", "path": "getResourceKey()"}],
+   "unionAll": [
+     {"forEach": "telecom", "column": [{"name": "kind", "path": "system"}, {"name": "text", "path": "value"}]},
+     {"forEach": "name", "column": [{"name": "kind", "path": "'name'"}, {"name": "text", "path": "family"}]}]}
+]}|
+
+@verbatim{
+id,kind,text
+ann,phone,555-0100
+ann,phone,555-0101
+ann,name,Lee
+bob,name,Ortiz
+}
+
+@tt{repeat} follows a path again and again, for records that nest to any depth. A filled-in
+questionnaire holds items that hold items; @tt{{"repeat": ["item"], "column": […]}} gives a row for
+every item at every level:
+
+@verbatim{
+id,link_id,text
+qr1,1,About you
+qr1,1.1,Smoker
+qr1,1.2,Allergies
+qr1,1.2.1,Penicillin
+}
+
+@subsection[#:tag "refused"]{When a view is refused}
+
+A view is checked against the standard's own description of a ViewDefinition before it runs. Each
+problem is one line, and the command exits with status 1.
+
+@itemlist[
+@item{@bold{A misspelt word of the format} (@tt{selct} for @tt{select}):
+@verbatim{sql-on-fhir: not a valid ViewDefinition: ViewDefinition: unknown field selct (see https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/viewdefinition.html#ViewDefinition)}}
+@item{@bold{A value outside the allowed list} (@tt{status}, @tt{resource} and @tt{fhirVersion} each
+have one; a status is @tt{active}, @tt{draft}, @tt{retired} or @tt{unknown}):
+@verbatim{sql-on-fhir: not a valid ViewDefinition: "live" is not in the required value set for ViewDefinition.status (http://hl7.org/fhir/ValueSet/publication-status)}}
+@item{@bold{A path that gives several values} for one cell: @tt{column given: path yields 2 items
+without collection=true}. Narrow the path, use @tt{forEach}, or mark the column as a collection
+(@secref["first"], step 5).}
+@item{@bold{A record is missing from the rows}, with no message: a @tt{forEach} over an element the
+record does not have drops it (@tt{forEachOrNull} keeps it), or a @tt{where} is false for it. To
+see which, run a view with only that path as a column.}
+@item{@bold{A file that is not JSON}: @tt{sql-on-fhir: view.json is not JSON: …}, with the place
+reading stopped.}]
+
+@section{Running it}
+
+@subsection{Command line}
+
+The command you will use is @tt{run}. The others are for people working on the package itself.
+
+@tabular[#:style 'boxed #:sep @hspace[2]
+(list (list @tt{raco sql-on-fhir run view.json data/ [--format ndjson|json|csv|fhir]} @elem{a view (JSON, or a @hash-lang[] @tt{sql-on-fhir} module of any extension) over a directory, Bundle or resource})
+      (list @tt{raco sql-on-fhir tck [-v]} @elem{the shared test suite, with its report; @tt{-v} prints each failure})
+      (list @tt{raco sql-on-fhir regen} @elem{regenerate the ViewDefinition model from the specification's package in @tt{spec/}})
+      (list @tt{raco sql-on-fhir check} "verify the generated model is current")
+      (list @tt{raco sql-on-fhir fetch [--version v] [--tests-commit sha]} "download the specification's package and the test suite again (needs the network)"))]
+
+The data given to @tt{run} is one of three things: a folder of JSON files, one record to a file; a
+single file holding a @italic{Bundle}, which is FHIR's envelope for many records in one file; or a
+single file holding one record. Only the records of the view's @tt{resource} kind are read; the
+rest are ignored. With no data at all, you get the heading and no rows.
+
+Exit status: 0 when the table was printed; 1 when the view was refused, a file was not JSON, or the
+view failed on the data (each one line with the reason), and when the test suite regresses; 2 when
+the command was called wrongly, such as with a file that does not exist.
+
+@subsection[#:tag "formats"]{Output formats, and what each is for}
+
+@litchar{--format} chooses how the same rows are written.
+
+@tabular[#:style 'boxed #:sep @hspace[2]
+(list (list @bold{format} @bold{what you get} @bold{use it for})
+      (list @tt{csv} "a heading line, then one comma-separated line per row" "a spreadsheet, or a database's import command")
+      (list @tt{ndjson} "one JSON object per line (the default)" "data tools that read a file line by line, and large outputs")
+      (list @tt{json} "one JSON array holding every row" "a program that reads the whole answer at once")
+      (list @tt{fhir} @elem{a FHIR @tt{Parameters} resource, one @tt{row} per row} "handing the rows to another FHIR system"))]
+
+The same two patients as NDJSON:
+
+@verbatim|{
+$ raco sql-on-fhir run patients.view.json data/
+{"birth_date":"1974-12-25","family":"Lee","gender":"female","id":"ann"}
+{"birth_date":"1990-03-01","family":"Ortiz","gender":"male","id":"bob"}
+}|
+
+Three details matter when another program reads the output:
+
+@itemlist[
+@item{@bold{Column order.} CSV and @tt{fhir} keep the view's column order. In the two JSON formats
+each row's keys are in alphabetical order; read them by name.}
+@item{@bold{Empty cells.} An empty cell is nothing between the commas in CSV, @tt{null} in JSON,
+and left out of the row in @tt{fhir}.}
+@item{@bold{Types.} JSON keeps numbers as numbers, true and false as themselves, and a
+@tt{collection} column as a list. CSV is text: a list is written as its JSON
+(@tt{"[""Ann"",""Marie""]"}), a cell containing a comma or a quote is quoted, and lines end with a
+carriage return and a line feed, as the CSV standard (RFC 4180) says.}]
+
+Parquet, a format the specification also names, is not written.
+
+@subsection[#:tag "lang"]{A view written as Racket forms}
+
+The same view can be written in a file that starts with @tt{#lang sql-on-fhir}, as nested forms in
+place of JSON. What you gain is earlier checking: the file is a Racket module, and a misspelt
+element or a status outside its list stops it from compiling. This is @tt{readings.sof}:
 
 @verbatim|{#lang sql-on-fhir
 (ViewDefinition
  (name "bp_readings") (status "active") (resource "Observation")
- (where (ViewDefinitionWhere (path "code.coding.where(system = 'http://loinc.org').code = '85354-9'")))
+ (where (ViewDefinitionWhere (path "code.coding.exists(system = 'http://loinc.org' and code = '85354-9')")))
  (select (ViewDefinitionSelect
           (column (ViewDefinitionSelectColumn (name "patient") (path "subject.getReferenceKey(Patient)"))
                   (ViewDefinitionSelectColumn (name "date") (path "effective.ofType(dateTime)"))
                   (ViewDefinitionSelectColumn (name "systolic")
                     (path "component.where(code.coding.code = '8480-6').value.ofType(Quantity).value"))))))}|
 
-@bold{3. Run it over a directory of resources.}
+It runs the same way, whatever the file is called:
 
 @verbatim{
-$ raco sql-on-fhir run readings.sof patients/ --format csv
+$ raco sql-on-fhir run readings.sof data/ --format csv
 patient,date,systolic
-p1,2024-03-01T09:00:00Z,152
-p1,2024-04-02T09:30:00Z,138
+ann,2024-03-01T09:00:00Z,152
+ann,2024-04-02T09:30:00Z,138
 }
 
-A misspelled element, a wrong type or a @tt{status} outside its value set is a compile error on the
-form. The same view as JSON runs the same way (@tt{raco sql-on-fhir run readings.view.json patients/});
-JSON is checked against the generated model and the IG's required value sets when it runs, so a
-misspelled element or a @tt{status} outside its value set is refused with its name and exit status 1.
+@tt{racket readings.sof} prints the view as JSON, the form to give to another tool.
 
-@section{Writing a view}
+The forms are the specification's elements, in the form syntax of the family's @tt{fhir/r6}
+language: @tt{ViewDefinition}; @tt{ViewDefinitionWhere}; @tt{ViewDefinitionSelect} (with
+@tt{column}, a nested @tt{select}, @tt{forEach}, @tt{forEachOrNull}, @tt{repeat}, @tt{unionAll});
+@tt{ViewDefinitionSelectColumn} (@tt{path}, @tt{name}, @tt{description}, @tt{collection},
+@tt{type}, @tt{tag}); and @tt{ViewDefinitionConstant}. A mistake names the form:
 
-A ViewDefinition picks a resource type, filters it (@tt{where}) and selects columns, each a FHIRPath
-path. The forms are the IG's elements in the @tt{fhir/r6} form syntax: @tt{ViewDefinition},
-@tt{ViewDefinitionWhere}, @tt{ViewDefinitionSelect} (@tt{column}, nested @tt{select},
-@tt{forEach}, @tt{forEachOrNull}, @tt{repeat}, @tt{unionAll}), @tt{ViewDefinitionSelectColumn}
-(@tt{path}, @tt{name}, @tt{description}, @tt{collection}, @tt{type}, @tt{tag}) and
-@tt{ViewDefinitionConstant} (a @tt{%name} for paths). Paths may use @tt{getResourceKey()},
-@tt{getReferenceKey(Type)}, @tt{%rowIndex} and the view's constants. The reference is the
-@hyperlink["https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/"]{SQL on FHIR IG}. The repository's
-@tt{guide.md} has a checked cheat sheet, a worked example and the common problems (a column that
-yields several values, a @tt{forEach} that drops resources, choice elements, references).
+@verbatim{
+ViewDefinition: unknown field ViewDefinition.resorce
+  at: resorce
+  in: (resorce "Observation")
 
-@section{Using it}
+ViewDefinition: "live" is not in the required value set for ViewDefinition.status (http://hl7.org/fhir/ValueSet/publication-status); valid codes: (active draft retired unknown)
+}
 
-@subsection{Command line}
+The repository's @tt{examples/patient-demographics.rkt} is a view written this way.
 
-@tabular[#:style 'boxed #:sep @hspace[2]
-(list (list @tt{raco sql-on-fhir run view.json data/ [--format ndjson|json|csv|fhir]} @elem{a view (JSON, or a @hash-lang[] @tt{sql-on-fhir} module of any extension) over a directory, Bundle or resource})
-      (list @tt{raco sql-on-fhir tck [-v]} "the shared suite (floor 144)")
-      (list @tt{raco sql-on-fhir regen | check} @elem{regenerate the model from @tt{spec/}; verify it is current})
-      (list @tt{raco sql-on-fhir fetch [--version v] [--tests-commit sha]} "refresh the package and the suite"))]
+@subsection[#:tag "racket"]{From a Racket program}
 
-Exit codes: 0, 1 on an error (a view the model refuses, a file that is not JSON, a view that fails on
-the data — each one line with the reason) or a suite regression, 2 on usage.
+@racket[view-rows] takes a view as JSON and gives its rows, each a hash from column name to value.
+Give it the records, or let it read them from the current @italic{data source}, the family's way
+of naming where data is (a folder, records in memory, a server's store):
 
-@subsection{As a module}
+@racketblock[
+(require json fhir/data-source (only-in sql-on-fhir/operations view-rows))
+(define (read-file f) (call-with-input-file f read-json))
+(define view (read-file "patients.view.json"))
 
-@racket[(require "readings.sof")] gives @racket[resources] (typed nodes), @racket[(->nodes)] and
-@racket[(->json)] (the ViewDefinitions as JSON). @tt{racket readings.sof} prints the JSON.
+(view-rows view (map read-file '("data/ann.json" "data/bob.json")))
+(code:comment "=> (list (hasheq 'id \"ann\" 'family \"Lee\" 'gender \"female\" 'birth_date \"1974-12-25\")")
+(code:comment "         (hasheq 'id \"bob\" 'family \"Ortiz\" 'gender \"male\" 'birth_date \"1990-03-01\"))")
+
+(parameterize ([current-data-source (directory->data-source "data/")])
+  (view-rows view))                  (code:comment "the same rows, from the folder")
+]
+
+A module written in @hash-lang[] @tt{sql-on-fhir} provides its views: @racket[resources] (the typed
+ViewDefinitions), @racket[(->nodes)] (the same) and @racket[(->json)] (as JSON, what
+@racket[view-rows] takes).
 
 @racketblock[
 (require (only-in "readings.sof" [->json views])
          fhir/data-source (only-in sql-on-fhir/operations view-rows))
 (parameterize ([current-data-source (resources->data-source observations)])
-  (view-rows (car (views))))         (code:comment "a list of hashes, one per reading")
+  (view-rows (car (views))))
+(code:comment "=> (list (hasheq 'patient \"ann\" 'date \"2024-03-01T09:00:00Z\" 'systolic 152) …)")
 ]
 
-@subsection{As an operation}
+@subsection[#:tag "operation"]{As a FHIR operation}
 
-@tt{$sql-run} answers the IG's formats as a Binary (or rows as a Parameters); data comes from
-@racket[current-data-source] or @tt{#:resource} inputs. A view that fails on the data (a column
-yielding several values without @tt{collection}) is the operation's error, an OperationOutcome
-with code @tt{processing}. fhir-server serves the same values over
-HTTP with @racket[(serve-operations (list $sql-run $sql-export) #:port 8080)].
+The specification defines two @italic{operations}, named requests a FHIR system can answer:
+@tt{$sql-run} runs one view and answers its rows, and @tt{$sql-export} runs several. Both are here
+as procedures, built on the specification's own definitions, so a server can offer them and a
+program can call them.
 
 @racketblock[
 (require fhir/operation fhir/data-source sql-on-fhir/operations)
-(parameterize ([current-data-source (directory->data-source "patients/")])
+(parameterize ([current-data-source (directory->data-source "data/")])
   ($sql-run view #:_format "csv")                       (code:comment "the view is the subject")
-  (apply-operation "$sql-run" #:subjectCanonical "http://example.org/ViewDefinition/x" #:_format "fhir"))
+  (apply-operation "$sql-run" #:subjectCanonical "http://example.org/ViewDefinition/x" #:_format "fhir")
+  ($sql-export #:subject (list view) #:_format "csv"))
 ]
 
-@section{In an editor, for an agent}
+@tt{$sql-run} answers CSV, NDJSON or JSON as a FHIR @tt{Binary} resource (the text, base64-encoded)
+and @tt{fhir} as a @tt{Parameters} of rows. The view is given directly, or named by its url
+(@tt{#:subjectCanonical}) or its reference (@tt{#:subjectReference}) and found in the data source.
+The data is the data source's, or records given with @tt{#:resource}. @tt{#:patient} keeps one
+patient's records, @tt{#:_since} those updated after a time, @tt{#:_limit} the first rows, and
+@tt{#:header "false"} leaves the heading out of CSV.
 
-@tt{sql-on-fhir/workspace} is what fhir-mcp runs for an agent: a @tt{*.view.json} file is a
-ViewDefinition (checked as it is written), @tt{run} gives its rows over the workspace's data, and
-@tt{explain} of one resource gives the rows it alone produces, its rows without the @tt{where}, and
-each @tt{where} on its own. It also provides the repository's @tt{guide.md} as @racket[guide],
-which fhir-mcp serves as @tt{learn://sql-on-fhir}. Without MCP, the repository's Claude skill
-(@tt{.claude/skills/sql-on-fhir}) gives an agent the same workflow with the command line and Racket.
+A view that is refused, or that fails on the data, raises @tt{exn:fail:operation} carrying an
+@tt{OperationOutcome}, FHIR's resource for reporting a problem; a path with several values for one
+cell has the code @tt{processing}.
+
+@tt{$sql-export} answers at once with a @tt{Parameters} resource: an @tt{exportId}, the status
+@tt{completed}, and one @tt{output} per view with its result inside as a @tt{Binary}.
+
+To offer both over HTTP, fhir-server serves any operation value:
+
+@racketblock[
+(require fhir/data-source sql-on-fhir/operations (only-in fhir/capability/operations serve-operations))
+(parameterize ([current-data-source (directory->data-source "data/")])
+  (serve-operations (list $sql-run $sql-export) #:port 8080))
+]
+
+A @tt{POST} of a @tt{Parameters} resource to @tt{/$sql-run}, holding the view as
+@tt{subjectResource} and @tt{_format} @tt{csv}, is then answered with the CSV.
+
+@section{For an AI agent, and in an editor}
+
+@itemlist[
+@item{@bold{For an agent.} In an
+@hyperlink["https://oloveluck.github.io/fhir/fhir-mcp/index.html"]{fhir-mcp} workspace a
+@tt{*.view.json} file is a ViewDefinition, checked as it is written: a path naming an element the
+record type lacks is reported at its place in the file, with the nearest name. @tt{run} gives the
+view's rows over the workspace's data. @tt{explain} of one record shows the rows that record alone
+produces, the rows it would produce without the @tt{where}, and whether each @tt{where} holds for
+it. Every view is also a table that the workspace's SQL queries can read, which is where the SQL in
+the name comes in. The repository's @tt{guide.md} is the format written for an agent to read
+(fhir-mcp serves it as @tt{learn://sql-on-fhir}), and @tt{.claude/skills/sql-on-fhir} is the same
+workflow for an agent using the command line.}
+@item{@bold{In an editor.} The family's language server does not cover views. A JSON view is
+checked when it runs; a @hash-lang[] @tt{sql-on-fhir} file is checked when it compiles.}]
 
 @section{Limits}
 
 @itemlist[
-@item{No SQL database: views are evaluated in memory through the fhirpath engine, one row list per
-view.}
-@item{@tt{$sql-run} ignores @tt{parameters}, @tt{context}, @tt{group} and @tt{source}; a
-@tt{patient} that does not resolve filters to nothing; only ViewDefinition subjects (no SQLQuery or
-SQLView Libraries); no Parquet.}
-@item{@tt{$sql-export} completes synchronously, with the results inline as Binaries: no job, polling,
-cancellation or download urls; @tt{_format=fhir} becomes ndjson.}
-@item{A column's @tt{type} and @tt{tag} are not enforced; constants must be primitives;
-@tt{getReferenceKey()} expects relative @tt{Type/id} references (an absolute url gives null).}]
+@item{@bold{No database.} The command makes the table; it does not run SQL. Views are evaluated in
+memory, one list of rows per view. To query the result, load the CSV or NDJSON into the database or
+spreadsheet you use, or work in a fhir-mcp workspace, where views are tables.}
+@item{@bold{The command line reads data as FHIR R6.} Most elements have the same name in R4, R5 and
+R6, and such data reads as it is. An element that R6 renamed or removed is not read, and its column
+is empty with no message: R4's @tt{medicationCodeableConcept} on a MedicationRequest is one. (A
+fhir-mcp workspace reads data in the workspace's own FHIR version.)}
+@item{@bold{@tt{$sql-run}} ignores the inputs @tt{parameters}, @tt{context}, @tt{group} and
+@tt{source}; a @tt{patient} that does not resolve filters to nothing; its subject is a
+ViewDefinition only (not the specification's SQLQuery or SQLView Libraries); it does not write
+Parquet.}
+@item{@bold{@tt{$sql-export}} finishes at once, with the results inside its answer as Binaries.
+There is no background job, polling, cancellation or download address, and @tt{_format=fhir}
+becomes NDJSON.}
+@item{@bold{Columns.} A column's @tt{type} and @tt{tag} are not enforced. Constants must be simple
+values (text, numbers, true or false, dates, codes).}
+@item{@bold{Missing elements.} The check catches a misspelt element and a value outside its allowed
+list. It does not notice a required element that is absent: a view without @tt{status} runs, and a
+view without @tt{resource} fails with a message about the program's internals.}
+@item{@bold{References.} @tt{getReferenceKey()} reads relative references (@tt{Patient/ann}); an
+absolute address gives an empty cell.}
+@item{@bold{Module errors at the command line.} When a @hash-lang[] @tt{sql-on-fhir} file does not
+compile, @tt{run} prints Racket's own error with its context lines, not the one-line form a JSON
+view gets.}]
+
+@section[#:tag "words"]{Words used here}
+
+@itemlist[
+@item{@bold{FHIR}: the health-care standard for records exchanged between systems.
+@bold{Resource}: one record of a given kind (a Patient, an Observation), written as JSON.}
+@item{@bold{Bundle}: one FHIR file that holds many resources.}
+@item{@bold{ViewDefinition}, or @bold{view}: the JSON file that describes a table over one kind of
+resource: its filters and its columns.}
+@item{@bold{Column}: a name and a path; @bold{row}: one line of the table, for one resource or one
+item inside it.}
+@item{@bold{FHIRPath}: the language of every path, for pointing at values inside a resource
+(@tt{name.family.first()}).}
+@item{@bold{@tt{forEach}}, @bold{@tt{forEachOrNull}}: make a row per item of a repeating element;
+the second keeps a resource that has none. @bold{@tt{where}}: a filter on resources.
+@bold{@tt{unionAll}}: stack alternatives. @bold{@tt{repeat}}: follow a path to any depth.}
+@item{@bold{Collection}: a column whose cell may hold a list.}
+@item{@bold{Constant}: a named value a view's paths use as @tt{%name}.}
+@item{@bold{Key}: a value two tables share so they can be joined: a resource's id
+(@tt{getResourceKey()}) and the id a reference names (@tt{getReferenceKey()}).}
+@item{@bold{Choice element}: an element that can hold one of several types, written with the type in
+its name (@tt{valueQuantity}); in a path, @tt{value.ofType(Quantity)}.}
+@item{@bold{Value set}: a fixed list of allowed codes, such as the four a @tt{status} may be.}
+@item{@bold{CSV}: comma-separated text, one row per line. @bold{NDJSON}: one JSON object per line.}
+@item{@bold{The specification}, or @bold{IG} (implementation guide): the published SQL on FHIR
+standard. Its @bold{package} is the machine-readable copy this tool's model is generated from.}
+@item{@bold{Operation}: a named request a FHIR system answers, written with a dollar sign
+(@tt{$sql-run}). @bold{Parameters}, @bold{Binary}, @bold{OperationOutcome}: the FHIR resources for
+an operation's inputs and outputs, for raw content, and for a reported problem.}
+@item{@bold{Canonical}: the url that names a definition such as a view, wherever it is stored.}
+@item{@bold{Data source}: the family's value for "where the data is": a folder, resources in
+memory, or a server's store.}]
+
+@section{How it is tested}
+
+@itemlist[
+@item{The test suite the SQL on FHIR project publishes for implementations to share: 144 of 144
+tests give the expected rows, and every view the suite calls invalid is refused.
+@tt{raco sql-on-fhir tck} runs it.}
+@item{The ViewDefinition model is generated from the specification's published package (version
+3.0.0-ballot), not written by hand, so what a view may contain is what the standard says.
+@tt{raco sql-on-fhir check} verifies the generated files are current.}
+@item{Every view in the repository's @tt{guide.md} is checked by the tests, and its examples give
+the rows the text states. This manual is rendered by a test that fails on a broken reference.}]
+
+@tt{raco test .} in the repository runs all of it. The repository's @tt{TESTING.md} says where the
+suite and the package come from and how to run each check. Both are copied into the repository
+unchanged: the specification's package under the CC0-1.0 licence, the test suite under MIT, as this
+package is.
 
 @section{Reference}
 

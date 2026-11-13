@@ -1,58 +1,41 @@
 # sql-on-fhir — SQL on FHIR
 
-[SQL on FHIR](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/): run a ViewDefinition over FHIR data
-and get a table, as CSV, NDJSON or JSON. The model is generated from HL7's published package and the
-shared test suite passes; [TESTING.md](TESTING.md) has the details.
-
-Part of the [fhir](https://github.com/oloveluck/fhir) family of FHIR languages and tools.
-
-## Command line
-
-[Build the family's tools](https://github.com/oloveluck/fhir#getting-the-tools) once and put
-`dist/bin` on your `PATH`; they run without Racket. With Racket installed, `raco sql-on-fhir` is the
-same.
-
-```sh
-sql-on-fhir run view.json patients/ --format csv     # a directory, a Bundle or one resource
-sql-on-fhir run view.json bundle.json                # NDJSON, the default
-```
+A FHIR record is a nested document: a patient holds a list of names, each with its own parts. A
+table has rows and columns. [SQL on FHIR](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/) is the
+standard for getting from one to the other: you write a *ViewDefinition*, a short JSON file that
+names the columns you want and where each one's value is found. This package runs it over your data
+and prints the table, ready for SQL or a spreadsheet.
 
 ```
-$ sql-on-fhir run view.json patients/ --format csv
-id,gender,birth_date
-p1,female,1974-12-25
-p2,male,1990-03-01
+$ sql-on-fhir run patients.view.json data/ --format csv
+id,family,gender,birth_date
+ann,Lee,female,1974-12-25
+bob,Ortiz,male,1990-03-01
 ```
 
-A view whose structure isn't a ViewDefinition's, such as a misspelled element, is refused with the
-reason and exit status 1, and so is a view that fails on the data. A `#lang sql-on-fhir` module runs
-the same way: `sql-on-fhir run readings.sof patients/`.
+The view behind it is a list of columns, each a name and a path into the record:
 
-## In Racket
-
-`#lang sql-on-fhir` writes a view in forms generated from the IG, so a misspelled element or a
-`status` outside its value set is a compile error:
-
-```racket
-#lang sql-on-fhir
-(ViewDefinition
- (name "patient_demographics") (status "active") (resource "Patient")
- (select (ViewDefinitionSelect
-          (column (ViewDefinitionSelectColumn (name "id") (path "getResourceKey()"))
-                  (ViewDefinitionSelectColumn (name "gender") (path "gender"))))))
+```json
+{"resourceType": "ViewDefinition", "name": "patients", "status": "active", "resource": "Patient",
+ "select": [{"column": [{"name": "id", "path": "getResourceKey()"},
+                        {"name": "family", "path": "name.family.first()"},
+                        {"name": "gender", "path": "gender"},
+                        {"name": "birth_date", "path": "birthDate"}]}]}
 ```
 
-`view-rows` (`sql-on-fhir/operations`) gives the rows as hashes, and `$sql-run` and `$sql-export` are
-operations you apply like procedures or serve over HTTP.
+## Install
 
-## Develop
+Build the [fhir family's tools](https://github.com/oloveluck/fhir#install) once; `sql-on-fhir` is
+one of them. With Racket, `raco sql-on-fhir` is the same command.
 
-```sh
-raco pkg install --link --auto ../fhir/fhir ../fhir/fhir-spec ../fhirpath .   # repos side by side
-raco test .
-```
+## Documentation
 
-Reference: [oloveluck.github.io/sql-on-fhir](https://oloveluck.github.io/sql-on-fhir/). The format for
-agents, with a checked cheat sheet and the common problems: [guide.md](guide.md); the workflow
-without MCP: [.claude/skills/sql-on-fhir](.claude/skills/sql-on-fhir/SKILL.md). License: MIT;
-the vendored IG package is CC0-1.0 and the test suite MIT.
+**[oloveluck.github.io/sql-on-fhir](https://oloveluck.github.io/sql-on-fhir/)**: a first example
+step by step, a row per record or per repeated item, filters, output formats, and the reference.
+
+- How well it works (all 144 tests of the shared SQL on FHIR suite): [TESTING.md](TESTING.md).
+- For AI agents: [guide.md](guide.md), a cheat sheet and the common problems, each one tested; and
+  the [sql-on-fhir skill](.claude/skills/sql-on-fhir/SKILL.md).
+- How it is built: [CLAUDE.md](CLAUDE.md).
+
+Part of the [fhir](https://github.com/oloveluck/fhir) family. License: MIT.
