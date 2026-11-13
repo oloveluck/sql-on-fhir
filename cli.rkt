@@ -8,7 +8,8 @@
 ;;;       version the view model is built over) unless --fhir-version names another; a path to an
 ;;;       element the resource type lacks in that version is a warning on stderr; so are a view that
 ;;;       states no `status`, and data the view reads that the read left out (an element that
-;;;       version does not have, a value that is not valid FHIR).
+;;;       version does not have, a value that is not valid FHIR), and a view that names the FHIR
+;;;       versions it is for (`fhirVersion`) when the data is read as another.
 ;;;   raco sql-on-fhir tck [-v]        the shared test suite (FHIR/sql-on-fhir.js tests, vendored)
 ;;;   raco sql-on-fhir regen | check   regenerate the model from spec/ | verify it is up to date
 ;;;   raco sql-on-fhir fetch [--version V] [--tests-commit SHA]
@@ -108,31 +109,39 @@
         [else (resources->data-source (list (call-with-input-file f read-json)))]))
 
 ;; A Warning is (cons message line): a static problem's own message, and the line the terminal shows.
-;; path-warnings : path ViewDefinition version-name -> (listof Warning)
+;; located : path diagnostic [suffix] -> Warning   `file:line:col: message` and what the command adds
+(define (located f d [suffix ""])
+  (define l (diagnostic-loc d))
+  (cons (diagnostic-message d)
+        (format "~a~a: ~a~a" f (if (and l (loc-line l)) (format ":~a:~a" (loc-line l) (loc-column l)) "") (diagnostic-message d) suffix)))
+
+;; path-warnings : path text ViewDefinition version-name -> (listof Warning)
 ;; every column, forEach and where path that names an element the view's resource type does not have
 ;; in the FHIR version the data is read as (the workspace support's static check), each at its place
 ;; in the file. Such a path gives no value, or fails once a resource is read: without this, a view
 ;; over no data, or a forEach over such an element, printed an empty table and said nothing.
 ;; The check is advice: a view it cannot follow is left to the run.
-(define (path-warnings f view version-name)
+(define (path-warnings f text view version-name)
   (define path-problems (dynamic-require workspace-module 'path-problems))
-  (for/list ([d (in-list (with-handlers ([exn:fail? (lambda (_) '())]) (path-problems f (file->string f) view)))])
-    (define l (diagnostic-loc d))
-    (cons (diagnostic-message d)
-          (format "~a~a: ~a (the data is read as FHIR ~a~a)"
-                  f (if (and l (loc-line l)) (format ":~a:~a" (loc-line l) (loc-column l)) "")
-                  (diagnostic-message d) version-name
-                  (if (equal? version-name "R6") "; --fhir-version 4.0.1 reads it as R4" "")))))
+  (for/list ([d (in-list (with-handlers ([exn:fail? (lambda (_) '())]) (path-problems f text view)))])
+    (located f d (format " (the data is read as FHIR ~a~a)" version-name
+                         (if (equal? version-name "R6") "; --fhir-version 4.0.1 reads it as R4" "")))))
 
-;; status-warnings : path ViewDefinition -> (listof Warning)   a JSON view that states no `status`:
-;; the standard requires one, and the view runs all the same (the shared suite's own views do)
-(define (status-warnings f view)
-  (define d ((dynamic-require workspace-module 'status-problem) f (file->string f) view))
-  (define l (and d (diagnostic-loc d)))
+;; status-warnings : path text ViewDefinition -> (listof Warning)   a JSON view that states no
+;; `status`: the standard requires one, and the view runs all the same (the shared suite's own views do)
+(define (status-warnings f text view)
+  (define d ((dynamic-require workspace-module 'status-problem) f text view))
+  (if d (list (located f d)) '()))
+
+;; version-warnings : path text ViewDefinition version-name -> (listof Warning)   a view that names
+;; the FHIR versions it is for (`fhirVersion`), read as another; with the option that reads the data
+;; as one of them, when there is one
+(define (version-warnings f text view version-name)
+  (define version-problem (dynamic-require workspace-module 'version-problem))
+  (define d (version-problem f text view version-name))
+  (define fitting (for/first ([v (in-list fhir-versions)] #:unless (version-problem f text view (cadr v))) v))
   (if d
-      (list (cons (diagnostic-message d)
-                  (format "~a~a: ~a" f (if (and l (loc-line l)) (format ":~a:~a" (loc-line l) (loc-column l)) "")
-                          (diagnostic-message d))))
+      (list (located f d (if fitting (format "; --fhir-version ~a reads it as ~a" (car fitting) (cadr fitting)) "")))
       '()))
 
 ;; unread-warnings : (listof string) (listof Warning) ViewDefinition -> (listof Warning)
@@ -157,9 +166,12 @@
   (load-tower! (caddr version))
   (define $sql-run (dynamic-require operations-module '$sql-run))
   (define view (read-view (car ps)))
+  (define text (file->string (car ps)))
   (define with-unread (dynamic-require workspace-module 'with-unread))
-  (define paths (path-warnings (car ps) view (cadr version)))
-  (define warnings (append (if (module-file? (car ps)) '() (status-warnings (car ps) view)) paths))
+  (define paths (path-warnings (car ps) text view (cadr version)))
+  (define warnings (append (if (module-file? (car ps)) '() (status-warnings (car ps) text view))
+                           (version-warnings (car ps) text view (cadr version))
+                           paths))
   (define (warn! ws) (for ([w (in-list ws)]) (eprintf "sql-on-fhir: warning: ~a\n" (cdr w))))
   (define-values (result unread)
     (parameterize ([current-data-source (read-data (and (pair? (cdr ps)) (cadr ps)))])

@@ -8,33 +8,38 @@
 ;;; validator), evaluate it over the file's resources with view.rkt, and compare rows
 ;;; (order-insensitive multiset equality; expectColumns checks declaration order).
 
-(require racket/contract racket/list json
+(require racket/contract racket/list racket/runtime-path json
          (only-in sql-on-fhir/model/types)               ; register ViewDefinition + the R6 base
          (only-in sql-on-fhir/view eval-view view-columns)
          (only-in fhir/serialize/from-json from-json)
          (only-in fhir/result/result ok? ok-value))
 
 (provide (contract-out
-          ;; run-suite : suite.json path -> (values passed total failures)
+          ;; suite-files : -> (listof path)   the vendored suite's files (its schema aside), by name
+          [suite-files (-> (listof path?))]
+          ;; run-suite : suite.json path -> (values passed total failures)   a failure: (list title message)
           [run-suite (-> path-string? (values exact-nonnegative-integer?
                                               exact-nonnegative-integer?
                                               list?))]))
+
+(define-runtime-path suite-dir "vendor/sql-on-fhir-tests")
+(define (suite-files)
+  (sort (for/list ([f (in-list (directory-list suite-dir #:build? #t))]
+                   #:when (regexp-match? #px"[.]json$" (path->string f))
+                   #:unless (regexp-match? #rx"schema" (path->string f)))
+          f)
+        string<? #:key path->string))
 
 (define (run-suite path)
   (define suite (call-with-input-file path read-json))
   (define resources (filter-map typed (hash-ref suite 'resources '())))
   (define tests (hash-ref suite 'tests '()))
-  (define failures '())
-  (define passed 0)
-  (for ([t (in-list tests)])
-    (define title (hash-ref t 'title "?"))
-    (define outcome (run-test t resources))
-    (match-outcome outcome
-                   (lambda () (set! passed (add1 passed)))
-                   (lambda (msg) (set! failures (cons (list title msg) failures)))))
-  (values passed (length tests) (reverse failures)))
-
-(define (match-outcome o on-pass on-fail) (if (eq? o 'pass) (on-pass) (on-fail o)))
+  (define failures
+    (for*/list ([t (in-list tests)]
+                [outcome (in-value (run-test t resources))]
+                #:unless (eq? outcome 'pass))
+      (list (hash-ref t 'title "?") outcome)))
+  (values (- (length tests) (length failures)) (length tests) failures))
 
 ;; typed : resource jsexpr -> fhir node | #f  (lenient — suite resources may use any profile)
 (define (typed js)
@@ -86,9 +91,8 @@
                [else #f]))))
 
 (module+ test
-  (require rackunit racket/runtime-path)
-  (define-runtime-path vendor "vendor/sql-on-fhir-tests")
-  (define-values (p a fails) (run-suite (build-path vendor "basic.json")))
+  (require rackunit)
+  (define-values (p a fails) (run-suite (build-path suite-dir "basic.json")))
   (printf "sof basic: ~a/~a\n" p a)
   (for ([f (in-list fails)]) (printf "  FAIL ~a: ~a\n" (car f) (cadr f)))
   (check-true (>= p 8) "most basic tests pass"))

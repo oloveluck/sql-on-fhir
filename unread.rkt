@@ -44,52 +44,65 @@
 ;; subsetOf … — take theirs from the focus the whole path started at)
 (define item-functions '(where select all exists repeat aggregate sort iif trace))
 
+;; view-chains : ViewDefinition jsexpr -> (listof Chain)
+;; Structural recursion over the view's selects (a column's path starts where its forEach ends) and,
+;; inside each path, over the FHIRPath AST.
 (define (view-chains view)
   (define type (let ([t (hash-ref view 'resource #f)]) (and (string? t) (string->symbol t))))
-  (define seen '())
-  (define (note! chains) (set! seen (append seen (filter pair? chains))) chains)
   (define (extend chains name) (for/list ([c (in-list chains)]) (append c (list (cons name #f)))))
   (define (narrow chains type-name)                       ; ofType(T), as T: the last step's member
     (for/list ([c (in-list chains)])
       (if (null? c) c (append (drop-right c 1) (list (cons (car (last c)) (capitalized type-name)))))))
-  ;; ends : ast (listof Chain) -> (listof Chain)   where the expression's values sit, from the focus
+  ;; ends : ast (listof Chain) -> (values (listof Chain) (listof Chain))
+  ;; where the expression's values sit, from the focus; and the chains read on the way there (the
+  ;; arguments of its functions), in the order they are met
   (define (ends ast focus)
+    (define (target t) (if t (ends t focus) (values focus '())))
+    (define-syntax-rule (after sub (at) result) (let-values ([(at read) sub]) (values result read)))
     (match ast
-      [(fp-invoke #f (== type)) #:when (equal? focus '(())) focus]       ; `Patient.name`: the resource itself
-      [(fp-invoke t n) (extend (if t (ends t focus) focus) (symbol->string n))]
-      [(fp-call t (or 'ofType 'as) (list ty)) #:when (type-name ty) (narrow (if t (ends t focus) focus) (type-name ty))]
-      [(fp-call t 'extension _) (extend (if t (ends t focus) focus) "extension")]
-      [(fp-call t 'getResourceKey '()) (extend (if t (ends t focus) focus) "id")]
+      [(fp-invoke #f (== type)) #:when (equal? focus '(())) (values focus '())]   ; `Patient.name`: the resource itself
+      [(fp-invoke t n) (after (target t) (at) (extend at (symbol->string n)))]
+      [(fp-call t (or 'ofType 'as) (list ty)) #:when (type-name ty) (after (target t) (at) (narrow at (type-name ty)))]
+      [(fp-call t 'extension _) (after (target t) (at) (extend at "extension"))]
+      [(fp-call t 'getResourceKey '()) (after (target t) (at) (extend at "id"))]
       [(fp-call t n args)
-       (define base (if t (ends t focus) focus))
-       (for ([a (in-list args)]) (note! (ends a (if (memq n item-functions) base focus))))
-       base]
+       (define-values (at read) (target t))
+       (values at (append read (append* (for/list ([a (in-list args)]) (reads a (if (memq n item-functions) at focus))))))]
       [(fp-index t _) (ends t focus)]
-      [(fp-typeop 'as o ty) (narrow (ends o focus) (symbol->string ty))]
+      [(fp-typeop 'as o ty) (after (ends o focus) (at) (narrow at (symbol->string ty)))]
       [(fp-typeop _ o _) (ends o focus)]
-      [(fp-binop _ l r) (append (ends l focus) (ends r focus))]
+      [(fp-binop _ l r) (let-values ([(l-at l-read) (ends l focus)] [(r-at r-read) (ends r focus)])
+                          (values (append l-at r-at) (append l-read r-read)))]
       [(fp-unop _ o) (ends o focus)]
-      [(fp-var '$this) focus]
-      [(fp-extern (or "resource" "rootResource" "context")) '(())]
-      [_ '()]))
-  (define (path-ends text focus)
-    (with-handlers ([exn:fail? (lambda (_) '())]) (ends (parse-fhirpath text) focus)))
-  (define (select! sel focus)
-    (when (hash? sel)
-      (cond
-        ;; repeat's paths are followed at every level: all of each element is read
-        [(hash-ref sel 'repeat #f)
-         => (lambda (paths) (for ([p (in-list (if (list? paths) paths '()))] #:when (string? p)) (note! (path-ends p focus))))]
-        [else
-         (define each (or (hash-ref sel 'forEach #f) (hash-ref sel 'forEachOrNull #f)))
-         (define inner (if (string? each) (path-ends each focus) focus))
-         (for ([c (in-list (hash-ref sel 'column '()))] #:when (and (hash? c) (string? (hash-ref c 'path #f))))
-           (note! (path-ends (hash-ref c 'path) inner)))
-         (for ([s (in-list (append (hash-ref sel 'select '()) (hash-ref sel 'unionAll '())))]) (select! s inner))])))
-  (for ([s (in-list (hash-ref view 'select '()))]) (select! s '(())))
-  (for ([w (in-list (hash-ref view 'where '()))] #:when (and (hash? w) (string? (hash-ref w 'path #f))))
-    (note! (path-ends (hash-ref w 'path) '(()))))
-  (remove-duplicates seen))
+      [(fp-var '$this) (values focus '())]
+      [(fp-extern (or "resource" "rootResource" "context")) (values '(()) '())]
+      [_ (values '() '())]))
+  ;; reads : ast focus -> (listof Chain)   every chain the expression reads: on the way, then its own
+  (define (reads ast focus) (let-values ([(at read) (ends ast focus)]) (append read (filter pair? at))))
+  ;; a path's text, parsed: one that is not FHIRPath reads nothing
+  (define (text-ends text focus)
+    (with-handlers ([exn:fail? (lambda (_) (values '() '()))]) (ends (parse-fhirpath text) focus)))
+  (define (text-reads text focus)
+    (with-handlers ([exn:fail? (lambda (_) '())]) (reads (parse-fhirpath text) focus)))
+  ;; select-chains : select jsexpr focus -> (listof Chain)
+  (define (select-chains sel focus)
+    (cond
+      [(not (hash? sel)) '()]
+      ;; repeat's paths are followed at every level: all of each element is read
+      [(hash-ref sel 'repeat #f)
+       => (lambda (paths) (append* (for/list ([p (in-list (if (list? paths) paths '()))] #:when (string? p)) (text-reads p focus))))]
+      [else
+       (define each (or (hash-ref sel 'forEach #f) (hash-ref sel 'forEachOrNull #f)))
+       (define-values (inner read) (if (string? each) (text-ends each focus) (values focus '())))
+       (append read
+               (append* (for/list ([c (in-list (hash-ref sel 'column '()))] #:when (and (hash? c) (string? (hash-ref c 'path #f))))
+                          (text-reads (hash-ref c 'path) inner)))
+               (append* (for/list ([s (in-list (append (hash-ref sel 'select '()) (hash-ref sel 'unionAll '())))])
+                          (select-chains s inner))))]))
+  (remove-duplicates
+   (append (append* (for/list ([s (in-list (hash-ref view 'select '()))]) (select-chains s '(()))))
+           (append* (for/list ([w (in-list (hash-ref view 'where '()))] #:when (and (hash? w) (string? (hash-ref w 'path #f))))
+                      (text-reads (hash-ref w 'path) '(())))))))
 
 ;; type-name : ast -> string | #f   the type an `ofType` argument names (`Quantity`, `FHIR.Quantity`)
 (define (type-name ast)

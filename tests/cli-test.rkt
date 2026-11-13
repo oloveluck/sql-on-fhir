@@ -100,6 +100,34 @@
   (check-equal? (caddr (run "typo.json" "--fhir-version" "4.0.1"))
                 "sql-on-fhir: warning: typo.json:3:26: no element MedicationRequest.statuss (did you mean `status`?) (the data is read as FHIR R4)\n"))
 
+(test-case "what a view says of itself: a path that is not FHIRPath, the FHIR versions it is for, its definition"
+  ;; a path that does not parse is the view's problem whatever the data: over no data it printed
+  ;; the heading alone, exit 0
+  (apply write! "bad-path.json" (meds "medication."))
+  (define refusal "sql-on-fhir: not a valid ViewDefinition: the path \"medication.\" is not FHIRPath: the expression ends after `.`\n")
+  (check-equal? (run "bad-path.json" "--format" "csv") (list 1 "" refusal))
+  (check-equal? (run "bad-path.json" "r4" "--format" "csv") (list 1 "" refusal))
+  ;; a view that names the FHIR versions it is for (`fhirVersion`), read as another, is told so, with
+  ;; the option that reads the data as one of them. R6 writes the canonical of ViewDefinition's
+  ;; definition beside `resourceType` (the IG's own examples do): it is no unknown element.
+  (write! "for-r4.json" "{\"resourceType\":\"ViewDefinition\","
+          " \"resourceDefinition\":\"http://hl7.org/fhir/StructureDefinition/ViewDefinition|3.0.0-ballot\","
+          " \"status\":\"active\",\"resource\":\"MedicationRequest\",\"fhirVersion\":[\"4.0\"],"
+          " \"select\":[{\"column\":[{\"name\":\"id\",\"path\":\"id\"}]}]}")
+  (check-equal? (run "for-r4.json" "r4" "--format" "csv")
+                (list 0 "id\r\nm1\r\n"
+                      (string-append "sql-on-fhir: warning: for-r4.json:3:51: the view is for FHIR 4.0 (`fhirVersion`) and the data is read as FHIR R6; "
+                                     "--fhir-version 4.0.1 reads it as R4\n")))
+  (check-equal? (run "for-r4.json" "r4" "--format" "csv" "--fhir-version" "4.0.1") (list 0 "id\r\nm1\r\n" ""))
+  ;; the definition's own rules: a column name a database does not take, two iterations in one select
+  (write! "names.json" "{\"resourceType\":\"ViewDefinition\",\"status\":\"active\",\"resource\":\"Patient\","
+          " \"select\":[{\"forEach\":\"name\",\"forEachOrNull\":\"name\",\"column\":[{\"name\":\"family-name\",\"path\":\"family\"}]}]}")
+  (check-equal? (run "names.json" "patients")
+                (list 1 "" (string-append "sql-on-fhir: not a valid ViewDefinition: "
+                                          "select[0] has more than one of `forEach`, `forEachOrNull` and `repeat`: a select takes one; "
+                                          "select[0].column[0].name \"family-name\" is not a name a database takes: "
+                                          "letters, digits and _ only, starting with a letter\n"))))
+
 (test-case "a value the view reads that the read left out is said, once for the data; what it does not read is not"
   ;; a dateTime with a time and no zone is not valid FHIR: the lenient read drops it, in any version
   (make-directory (build-path dir "encounters"))

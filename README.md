@@ -1,5 +1,9 @@
 # sql-on-fhir — SQL on FHIR
 
+> Part of [fhir](https://github.com/oloveluck/fhir), a FHIR implementation designed to be used by
+> AI agents: one line per problem, at its place, with what would fix it; a guide written for an
+> agent to read; the same language inside the `fhir-mcp` workspace.
+
 A FHIR record is a nested document: a patient holds a list of names, each with its own parts. A
 table has rows and columns. [SQL on FHIR](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/) is the
 standard for getting from one to the other: you write a *ViewDefinition*, a short JSON file that
@@ -33,9 +37,9 @@ one of them. With Racket, `raco sql-on-fhir` is the same command.
 **[oloveluck.github.io/sql-on-fhir](https://oloveluck.github.io/sql-on-fhir/)**: a first example
 step by step, a row per record or per repeated item, filters, output formats, and the reference.
 
-- How well it works (all 144 tests of the shared SQL on FHIR suite): [TESTING.md](TESTING.md).
-- For AI agents: [guide.md](guide.md), a cheat sheet and the common problems, each one tested; and
+- For agents: [guide.md](guide.md), a cheat sheet and the common problems, each one tested; and
   the [sql-on-fhir skill](.claude/skills/sql-on-fhir/SKILL.md).
+- How well it works (all 144 tests of the shared SQL on FHIR suite): [TESTING.md](TESTING.md).
 - How it is built: [CLAUDE.md](CLAUDE.md).
 
-Part of the [fhir](https://github.com/oloveluck/fhir) family. License: MIT.
+License: MIT.

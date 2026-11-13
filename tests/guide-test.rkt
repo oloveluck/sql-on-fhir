@@ -7,8 +7,8 @@
 
 (require rackunit racket/runtime-path racket/file racket/list racket/string json
          fhir/operation
-         (only-in sql-on-fhir/workspace guide with-unread status-problem)
-         (only-in fhir/diagnostic diagnostic-message)
+         (only-in sql-on-fhir/workspace guide with-unread status-problem version-problem)
+         (only-in fhir/diagnostic diagnostic-message diagnostic-loc loc-line loc-column)
          (only-in sql-on-fhir/operations view-rows $sql-run))
 
 (define-runtime-path guide-file "../guide.md")
@@ -83,13 +83,34 @@
   (check-exn (regexp (regexp-quote "select[0].column[2] has no `name` "))
              (lambda () (view-rows (view "Patient" (list (hasheq 'column three))) patients)))
   (check-equal? (length (view-rows (hash-remove (view "Patient" (list id)) 'status) patients)) 2)
+  ;; quoted? : sentence -> boolean   the guide says it, whatever its line breaks
+  (define (quoted? sentence) (regexp-match? (regexp-quote sentence) (regexp-replace* #px"\\s+" text " ")))
+  ;; the definition's own rules and the engine's refusals, in the words the guide quotes
+  (define (refused v) (with-handlers ([exn:fail? exn-message]) ($sql-run v #:resource patients) "ran"))
+  (define (quoted-refusal? v sentence)
+    (and (regexp-match? (regexp-quote sentence) (refused v))
+         (regexp-match? (regexp-quote sentence) (regexp-replace* #px"\\s+" text " "))))
+  (check-true (quoted-refusal? (view "Patient" (list (hasheq 'column (list (hasheq 'name "id" 'path "id") (hasheq 'name "first-name" 'path "name.given.first()")))))
+                               "select[0].column[1].name \"first-name\" is not a name a database takes: letters, digits and _ only, starting with a letter"))
+  (check-true (quoted-refusal? (view "Patient" (list (hasheq 'column (list (hasheq 'name "id" 'path "id") (hasheq 'name "id" 'path "gender")))))
+                               "the column name `id` is used twice"))
+  (check-true (quoted-refusal? (view "Patient" (list (hasheq 'forEach "name" 'repeat '("name") 'column family)))
+                               "select[0] has more than one of `forEach`, `forEachOrNull` and `repeat`: a select takes one"))
+  (check-true (quoted-refusal? (view "Patient" (list (hasheq 'column (list (hasheq 'name "n" 'path "name.")))))
+                               "the path \"name.\" is not FHIRPath: the expression ends after `.`"))
+  ;; the FHIR versions a view is for, against the one read; R6's `resourceDefinition` is no element
+  (define for-r4 "{\"resource\": \"Patient\",\n \"status\": \"active\",\n \"fhirVersion\": [\"4.0\"], \"select\": []}")
+  (check-equal? (diagnostic-message (version-problem "view.json" for-r4 (string->jsexpr for-r4) "R6"))
+                "the view is for FHIR 4.0 (`fhirVersion`) and the data is read as FHIR R6")
+  (check-equal? (let ([l (diagnostic-loc (version-problem "view.json" for-r4 (string->jsexpr for-r4) "R6"))]) (list (loc-line l) (loc-column l))) '(3 2))
+  (check-true (quoted? "warning: view.json:3:2: the view is for FHIR 4.0 (`fhirVersion`) and the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4"))
+  (check-equal? (length (view-rows (hash-set (view "Patient" (list id)) 'resourceDefinition "http://hl7.org/fhir/StructureDefinition/ViewDefinition|3.0.0-ballot") patients)) 2)
   ;; read as R6 (this process, like the command line by default), an R4 MedicationRequest's drug is
   ;; not found by a path valid in both versions: an empty column, and the sentence the guide quotes
   (define r4-request (hasheq 'resourceType "MedicationRequest" 'id "m1" 'status "active" 'intent "order"
                              'medicationCodeableConcept (hasheq 'text "metformin 500 mg")))
   (define drug (list (hasheq 'column (list (hasheq 'name "drug" 'path "medication.ofType(CodeableConcept).text")))))
   (define (rows+unread v resources) (call-with-values (lambda () (with-unread v "R6" (lambda () (view-rows v resources)))) list))
-  (define (quoted? sentence) (regexp-match? (regexp-quote sentence) (regexp-replace* #px"\\s+" text " ")))
   (define no-element
     (string-append "1 of 1 MedicationRequest resources holds `medicationCodeableConcept`, which was not read: FHIR R6 has no such "
                    "element (the first: MedicationRequest/m1); --fhir-version 4.0.1 reads the data as R4"))
