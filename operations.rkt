@@ -109,6 +109,8 @@
   (when (equal? (hash-ref view 'resourceType #f) "Library")
     (operation-error "not-supported" "the subject is a Library: a SQLQuery or SQLView is not run, a ViewDefinition is"))
   view)
+;; stored-view-by-url : canonical -> ViewDefinition | #f   the data source's view of that url (and
+;; version, when the canonical pins one)
 (define (stored-view-by-url canonical)
   (define parts (string-split canonical "|"))
   (findf (lambda (v) (and (equal? (hash-ref v 'url #f) (car parts))

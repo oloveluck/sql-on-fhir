@@ -38,6 +38,13 @@ and worked example, and the common problems (that guide is what fhir-mcp serves 
    ```
    sql-on-fhir: not a valid ViewDefinition: select[0].column[2] has no `name` (the column's name in the table)
    ```
+   So are the definition's own rules, and a path that is not FHIRPath (whatever the data):
+   ```
+   sql-on-fhir: not a valid ViewDefinition: select[0].column[1].name "birth-date" is not a name a database takes: letters, digits and _ only, starting with a letter
+   sql-on-fhir: not a valid ViewDefinition: the column name `id` is used twice: the columns of a table are named apart
+   sql-on-fhir: not a valid ViewDefinition: select[0] has more than one of `forEach`, `forEachOrNull` and `repeat`: a select takes one
+   sql-on-fhir: not a valid ViewDefinition: the path "name.family." is not FHIRPath: the expression ends after `.`
+   ```
    A view that fails on the data is refused the same way:
    `sql-on-fhir: column codes: path yields 2 items without collection=true`. A path to an element
    the type lacks in the version read is said at its line and column — the refusal when a column
@@ -45,6 +52,10 @@ and worked example, and the common problems (that guide is what fhir-mcp serves 
    `forEach`):
    ```
    sql-on-fhir: meds.view.json:9:32: no element MedicationRequest.medicationCodeableConcept (the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4)
+   ```
+   A view that names the versions it is for (`"fhirVersion": ["4.0"]`), read as another, is warned:
+   ```
+   sql-on-fhir: warning: r4.view.json:6:3: the view is for FHIR 4.0 (`fhirVersion`) and the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4
    ```
    An empty cell where the resource has a value is said too, when the view reads the element
    (stdout and the exit status are unchanged; what the view does not read is not reported):
@@ -54,7 +65,9 @@ and worked example, and the common problems (that guide is what fhir-mcp serves 
    ```
    A `#lang sql-on-fhir` file that does not compile prints its message alone (`sql-on-fhir:
    readings.sof:3:41: ViewDefinition: unknown field ViewDefinition.resorce`, the form on the next
-   lines), exit 1.
+   lines), exit 1. A path that is not FHIRPath is such an error, at its string
+   (``bad-path.sof:5:68: ViewDefinition: the path "family." is not FHIRPath: the expression ends
+   after `.` ``): `raco make` finds it.
 3. **Narrow it down.** Too few rows: a `where` that is false, or a `forEach` over an element some
    resources lack (`forEachOrNull` keeps them). Check one path at a time with FHIRPath
    (`raco fhirpath '<path>' resource.json`, the fhirpath skill), or run a view with just that column.
@@ -71,8 +84,11 @@ and worked example, and the common problems (that guide is what fhir-mcp serves 
 ```
 `$sql-run` also names a stored view: `(apply-operation "$sql-run" #:subjectCanonical "<url>" …)` finds
 the ViewDefinition with that url in the data source. Inputs: `#:resource` (resources or Bundles
-instead of the data source), `#:patient`, `#:_since`, `#:_limit`, `#:header`. A failure raises
-`exn:fail:operation` with an OperationOutcome.
+instead of the data source), `#:patient` and `#:group` (a Group's members; each must be in the data
+source), `#:_since`, `#:_limit`, `#:header`. A failure raises `exn:fail:operation` with an
+OperationOutcome: `invalid` for a refused view or input, `processing` for a failure on the data,
+`not-supported` for a Library subject, `#:source` and Parquet. `$sql-export` refuses `_format` `fhir`
+and two outputs of one name (a subject's `name` part names its output).
 
 A `#lang sql-on-fhir` module provides `resources` (typed views) and `(->json)`:
 ```racket
@@ -87,4 +103,7 @@ suite (144/144, the floor; `-v` also prints each failure). `model/` is GENERATED
 `spec/`: never edit it — `raco sql-on-fhir regen` rewrites it, `raco sql-on-fhir check` verifies it
 ("the model is up to date with spec/"), and `raco sql-on-fhir fetch [--version V] [--tests-commit SHA]`
 refreshes the package and the suite. `tests/guide-test.rkt` keeps guide.md's examples true;
-`tests/cli-test.rkt` runs the command itself (messages, warnings, exit statuses, `--fhir-version`).
+`tests/cli-test.rkt` runs the command itself (messages, warnings, exit statuses, `--fhir-version`);
+`tests/tck-test.rkt` also holds the IG's own ten example views to be accepted as published.
+The modules: `definition.rkt` (a view held to the IG's definition), `view.rkt` (the engine: a view
+compiled once, then run), `operations.rkt`, `unread.rkt`, `workspace.rkt`, `cli.rkt`.

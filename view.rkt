@@ -70,6 +70,8 @@
   ;; a view refused before any data is read (the message says why); `path` is the path's text when
   ;; the problem is one path's syntax, else #f
   [struct (exn:fail:view exn:fail) ([message string?] [continuation-marks continuation-mark-set?] [path (or/c string? #f)])]
+  ;; path-syntax-problem : a path's text -> what is wrong with its syntax, or #f
+  [path-syntax-problem (-> string? (or/c string? #f))]
   ;; rewrite-sof : FHIRPath AST -> AST   getResourceKey()/getReferenceKey(Type) as plain FHIRPath (the
   ;; workspace checks a view's paths after it, as the engine evaluates them)
   [rewrite-sof  (-> any/c any/c)]))
@@ -132,12 +134,16 @@
 ;; says whose path it is when there is none, or it does not parse
 (define (compile-path text owner)
   (unless (string? text) (refuse #f "~a has no `path`" owner))
-  (define ast
-    (with-handlers ([exn:fail:diagnostic?
-                     (lambda (e) (refuse text "the path ~s is not FHIRPath: ~a" text
-                                         (diagnostic-message (exn:fail:diagnostic-diagnostic e))))])
-      (parse-fhirpath text)))
-  (expr text (rewrite-sof ast) (make-hasheq)))
+  (cond [(path-syntax-problem text) => (lambda (problem) (refuse text "~a" problem))])
+  (expr text (rewrite-sof (parse-fhirpath text)) (make-hasheq)))
+
+;; path-syntax-problem : string -> string | #f   what is wrong with a path's syntax, as a sentence
+;; (#f: it is FHIRPath). The `#lang sql-on-fhir` reader asks it of every path a file writes.
+(define (path-syntax-problem text)
+  (with-handlers ([exn:fail:diagnostic?
+                   (lambda (e) (format "the path ~s is not FHIRPath: ~a" text (diagnostic-message (exn:fail:diagnostic-diagnostic e))))])
+    (parse-fhirpath text)
+    #f))
 
 ;; constants-env : node -> (Hash String Collection)   view.constant as %externals: the first value[x]
 ;; a constant carries, as a one-item collection
@@ -327,4 +333,38 @@
   (check-exn #rx"eval-view: the view has no `resource`"
              (lambda () (eval-view (mk (hasheq 'resourceType "ViewDefinition" 'status "active"
                                                'select (list (hasheq 'column (list (hasheq 'name "id" 'path "id"))))))
-                                   (list pt)))))
+                                   (list pt))))
+  ;; what is wrong with the view itself is told before any resource is read (over no resources
+  ;; these gave no rows and no error): a path that is not FHIRPath, with its text; unionAll
+  ;; branches of different columns; a column name used twice
+  (define (selecting . sels) (mk (hasheq 'resourceType "ViewDefinition" 'status "active" 'resource "Patient" 'select sels)))
+  (define (columns . names) (hasheq 'column (for/list ([n (in-list names)]) (hasheq 'name n 'path "id"))))
+  (define (refusal v) (with-handlers ([exn:fail:view? (lambda (e) (list (exn-message e) (exn:fail:view-path e)))]) (eval-view v '())))
+  (check-equal? (refusal (selecting (hasheq 'forEach "name" 'column (list (hasheq 'name "f" 'path "family.")))))
+                '("eval-view: the path \"family.\" is not FHIRPath: the expression ends after `.`" "family."))
+  (check-equal? (refusal (selecting (hasheq 'unionAll (list (columns "a" "b") (columns "b" "a")))))
+                '("eval-view: unionAll branches disagree on columns: ((a b) (b a))" #f))
+  (check-equal? (refusal (selecting (columns "id") (hasheq 'forEach "name" 'select (list (columns "id")))))
+                '("eval-view: the column name `id` is used twice: the columns of a table are named apart" #f))
+  (check-equal? (eval-view (selecting (columns "id") (hasheq 'unionAll (list (columns "a") (columns "a")))) '()) '())
+  ;; what depends on the data is an error when a resource meets it, and none before
+  (define several (selecting (hasheq 'column (list (hasheq 'name "f" 'path "name.family")))))
+  (check-equal? (eval-view several '()) '())
+  (check-exn (lambda (e) (and (exn:fail? e) (not (exn:fail:view? e)) (regexp-match? #rx"column f: path yields 2 items" (exn-message e))))
+             (lambda () (eval-view several (list pt))))
+  ;; the static pass is asked once per path and focus type, not once per resource: three Patients,
+  ;; one verdict (and one for the HumanName the forEach iterates)
+  (define compiled (compile-view view))
+  (define (verdicts x) (hash-count (expr-verdicts x)))
+  (define rows (let ([consts (view-consts compiled)])
+                 (for/list ([r (in-list (list pt pt pt))]) (product (for/list ([s (in-list (view-selects compiled))]) (sel-rows s r consts 0))))))
+  (check-equal? (length (append* rows)) 6)
+  (check-equal? (for*/list ([s (in-list (view-selects compiled))] [c (in-list (sel-columns s))]) (verdicts (col-expr c))) '(1 1))
+  (check-equal? (verdicts (each-expr (sel-iteration (cadr (view-selects compiled))))) 1)
+  ;; forEachOrNull's one row over nothing: element paths are null, %rowIndex is 0, a list is empty
+  (check-equal? (eval-view (selecting (columns "id")
+                                      (hasheq 'forEachOrNull "contact"
+                                              'column (list (hasheq 'name "n" 'path "%rowIndex") (hasheq 'name "g" 'path "gender")
+                                                            (hasheq 'name "t" 'path "telecom.value" 'collection #t))))
+                           (list pt))
+                '(((id . "p1") (n . 0) (g . null) (t . ())))))

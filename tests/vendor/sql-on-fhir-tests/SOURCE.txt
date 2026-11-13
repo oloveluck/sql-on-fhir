@@ -7,5 +7,5 @@ the reference implementation repository the IG points to for its tests.
   license:   MIT (LICENSE.md, copied from that repository)
 
 22 files, 144 tests. Each test: a ViewDefinition (`view`), the file's `resources`, and either the
-expected rows (`expect`, `expectColumns`) or `expectError`. Run with: raco sql-on-fhir --tck
+expected rows (`expect`, `expectColumns`) or `expectError`. Run with: raco sql-on-fhir tck
 Refresh with: raco sql-on-fhir fetch

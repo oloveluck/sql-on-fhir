@@ -2,7 +2,7 @@
 @; Text in @tt is shown exactly as written: no curly quotes, and "--" stays two hyphens.
 @(require (only-in scribble/core [element literal-element]))
 @(define (tt . text) (literal-element (quote tt) text))
-@(require (for-label racket/base racket/contract sql-on-fhir/view sql-on-fhir/operations sql-on-fhir/workspace))
+@(require (for-label racket/base racket/contract sql-on-fhir/view sql-on-fhir/definition sql-on-fhir/operations sql-on-fhir/workspace))
 
 @; a path shown inline, with its single quotes kept straight (plain @tt would curl them)
 @(define (path . strs) (tt (literal (apply string-append strs))))
@@ -371,6 +371,17 @@ sql-on-fhir: not a valid ViewDefinition: select[0].column[2] has no `name` (the 
 @tt{status} is the exception: a view without it runs, and a warning says it is missing
 (@secref["limits"]):
 @verbatim|{sql-on-fhir: warning: patients.view.json:1:1: no `status` (the standard requires it: "draft", "active", "retired" or "unknown")}|}
+@item{@bold{A name a database would not take.} The view's own @tt{name}, a constant's and a
+column's are letters, digits and @tt{_}, starting with a letter: the standard's rule, so that a view
+makes a table anywhere. Two columns of one table cannot share a name either:
+@verbatim|{sql-on-fhir: not a valid ViewDefinition: select[0].column[1].name "birth-date" is not a name a database takes: letters, digits and _ only, starting with a letter
+sql-on-fhir: not a valid ViewDefinition: the column name `id` is used twice: the columns of a table are named apart}|}
+@item{@bold{Two ways of making rows in one select.} A select takes one of @tt{forEach},
+@tt{forEachOrNull} and @tt{repeat}; for a second, put a select inside the first:
+@verbatim|{sql-on-fhir: not a valid ViewDefinition: select[0] has more than one of `forEach`, `forEachOrNull` and `repeat`: a select takes one}|}
+@item{@bold{A path that is not FHIRPath} (here @tt{name.family.}, with a dot too many), whether or
+not there are records to read:
+@verbatim|{sql-on-fhir: not a valid ViewDefinition: the path "name.family." is not FHIRPath: the expression ends after `.`}|}
 @item{@bold{A path to an element the record type does not have}, a misspelling or an element of
 another FHIR version: refused when a column reads it from a record, as in @secref["columns"]. Where
 nothing fails, the table is printed and the problem is a warning beside it (on the error stream, so
@@ -475,6 +486,17 @@ ann,
 
 So for R4 data, name the version.
 
+A view can say which versions it is written for, in @tt{fhirVersion}. The option still decides how
+the records are read; when the two disagree, a warning says so and names the option. With
+@tt{"fhirVersion": ["4.0"]} on the sixth line of a view:
+
+@verbatim|{
+$ raco sql-on-fhir run r4.view.json data/ --format csv
+sql-on-fhir: warning: r4.view.json:6:3: the view is for FHIR 4.0 (`fhirVersion`) and the data is read as FHIR R6; --fhir-version 4.0.1 reads it as R4
+id,gender
+ann,female
+}|
+
 @subsection[#:tag "formats"]{Output formats, and what each is for}
 
 @litchar{--format} chooses how the same rows are written.
@@ -512,7 +534,8 @@ Parquet, a format the specification also names, is not written.
 
 The same view can be written in a file that starts with @tt{#lang sql-on-fhir}, as nested forms in
 place of JSON. What you gain is earlier checking: the file is a Racket module, and a misspelt
-element or a status outside its list stops it from compiling. This is @tt{readings.sof}:
+element, a status outside its list or a path that is not FHIRPath stops it from compiling. This is
+@tt{readings.sof}:
 
 @verbatim|{#lang sql-on-fhir
 (ViewDefinition
@@ -552,9 +575,16 @@ sql-on-fhir: readings.sof:3:41: ViewDefinition: unknown field ViewDefinition.res
 $ raco sql-on-fhir run readings.sof data/
 sql-on-fhir: readings.sof:3:30: ViewDefinition: "live" is not in the required value set for ViewDefinition.status (http://hl7.org/fhir/ValueSet/publication-status); valid codes: (active draft retired unknown)
   in: "live"
+
+$ raco sql-on-fhir run readings.sof data/
+sql-on-fhir: readings.sof:7:66: ViewDefinition: the path "effective.ofType(dateTime" is not FHIRPath: the expression ends after `dateTime`
+  at: "effective.ofType(dateTime"
+  in: (path "effective.ofType(dateTime")
 }|
 
-Unlike a JSON view, this form also refuses a view that leaves out @tt{status}.
+The last is a path with its closing bracket missing: every path in the file is read as FHIRPath
+when the file compiles. Unlike a JSON view, this form also refuses a view that leaves out
+@tt{status}.
 
 The repository's @tt{examples/patient-demographics.rkt} is a view written this way.
 
@@ -608,15 +638,19 @@ program can call them.
 and @tt{fhir} as a @tt{Parameters} of rows. The view is given directly, or named by its url
 (@tt{#:subjectCanonical}) or its reference (@tt{#:subjectReference}) and found in the data source.
 The data is the data source's, or records given with @tt{#:resource}. @tt{#:patient} keeps one
-patient's records, @tt{#:_since} those updated after a time, @tt{#:_limit} the first rows, and
-@tt{#:header "false"} leaves the heading out of CSV.
+patient's records and @tt{#:group} those of a Group's members (a patient or a group the data source
+does not hold is refused), @tt{#:_since} those updated after a time, @tt{#:_limit} the first rows,
+and @tt{#:header "false"} leaves the heading out of CSV.
 
 A view that is refused, or that fails on the data, raises @tt{exn:fail:operation} carrying an
-@tt{OperationOutcome}, FHIR's resource for reporting a problem; a path with several values for one
-cell has the code @tt{processing}.
+@tt{OperationOutcome}, FHIR's resource for reporting a problem. Its code is @tt{invalid} for a view
+that is refused, @tt{processing} for a path with several values for one cell, and
+@tt{not-supported} for what the specification defines and this package does not do
+(@secref["limits"]).
 
 @tt{$sql-export} answers at once with a @tt{Parameters} resource: an @tt{exportId}, the status
-@tt{completed}, and one @tt{output} per view with its result inside as a @tt{Binary}.
+@tt{completed}, and one @tt{output} per view with its result inside as a @tt{Binary}. An output is
+named by its subject's @tt{name}, else by the view's; two outputs of one name are refused.
 
 To offer both over HTTP, fhir-server serves any operation value:
 
@@ -663,15 +697,18 @@ reads that element (@secref["refused"]); the value itself is not repaired.}
 @item{@bold{The warnings about data are the command line's and the workspace's.} A program that
 calls @racket[view-rows] or @tt{$sql-run} gets the rows alone, unless it sets
 @racket[current-read-log] and reads what was left out from it.}
-@item{@bold{@tt{$sql-run}} ignores the inputs @tt{parameters}, @tt{context}, @tt{group} and
-@tt{source}; a @tt{patient} that does not resolve filters to nothing; its subject is a
-ViewDefinition only (not the specification's SQLQuery or SQLView Libraries); it does not write
-Parquet.}
+@item{@bold{@tt{$sql-run}} runs a ViewDefinition only. The specification's SQLQuery and SQLView
+Libraries (SQL over views), reading from an external @tt{source}, and Parquet output are answered
+@tt{not-supported}. @tt{context} is accepted and unused: it supplies what a Library depends on.}
 @item{@bold{@tt{$sql-export}} finishes at once, with the results inside its answer as Binaries.
-There is no background job, polling, cancellation or download address, and @tt{_format=fhir}
-becomes NDJSON.}
-@item{@bold{Columns.} A column's @tt{type} and @tt{tag} are not enforced. Constants must be simple
-values (text, numbers, true or false, dates, codes).}
+There is no background job, polling, cancellation or download address.}
+@item{@bold{Columns.} A column's @tt{type} is not checked against the values its path gives, and
+not used to convert them; the standard says an implementation should report a mismatch, and a
+value that is not a simple one without a @tt{type}. A @tt{tag} is kept and not used.}
+@item{@bold{@tt{fhirVersion} and @tt{profile} do not choose anything.} A view's @tt{fhirVersion} is
+compared with the version the data is read as, and a difference is a warning
+(@secref["versions"]); the option, or the workspace, decides. Whether the records conform to a
+view's @tt{profile} is not checked.}
 @item{@bold{@tt{status} is not insisted on.} The standard requires it, and a JSON view without it
 runs all the same, with a warning: 33 of the 133 views the standard's own test suite expects to run
 leave it out, so refusing them would fail that suite. Every other required part is asked for
@@ -719,6 +756,8 @@ memory, or a server's store.}]
 @item{The test suite the SQL on FHIR project publishes for implementations to share: 144 of 144
 tests give the expected rows, and every view the suite calls invalid is refused.
 @tt{raco sql-on-fhir tck} runs it.}
+@item{The ten ViewDefinitions the specification's package publishes as its examples are each
+accepted as published, and no rule this package holds a view to refuses a view the suite runs.}
 @item{The ViewDefinition model is generated from the specification's published package (version
 3.0.0-ballot), not written by hand, so what a view may contain is what the standard says.
 @tt{raco sql-on-fhir check} verifies the generated files are current.}
@@ -745,9 +784,24 @@ Each top-level form builds a typed ViewDefinition; the module provides @racket[r
 
 @defproc[(eval-view [view fhir?] [resources (listof fhir?)]) (listof list?)]{
 The rows of a typed ViewDefinition over typed resources, each row an association list from column
-name to value, in column order. Every path goes through the fhirpath engine; a view error is raised
-by @racket['eval-view].}
+name to value, in column order. Every path goes through the fhirpath engine, parsed once for the
+view. What is wrong with the view itself is raised before any resource is read, as an
+@racket[exn:fail:view]; what goes wrong on the data (several values for one cell) is an
+@racket[exn:fail] raised by @racket['eval-view].}
 @defproc[(view-columns [view fhir?]) (listof symbol?)]{The column names, in declaration order.}
+@defstruct[(exn:fail:view exn:fail) ([path (or/c string? #f)])]{
+A view the engine refuses whatever the data: a path that is not FHIRPath (@racket[path] is its
+text), @tt{unionAll} branches whose columns differ, a column name used twice, no @tt{resource}.}
+
+@subsection[#:style 'unnumbered]{@tt{sql-on-fhir/definition}}
+@defmodule[sql-on-fhir/definition]
+
+@defproc[(read-view [view hash?]) (or/c fhir? (listof string?))]{
+A ViewDefinition given as JSON, as the typed node @racket[eval-view] takes, when it is one by the
+specification's definition; else what is wrong with it, one string per problem. Checked: the
+elements and their shapes, the required elements (all but @tt{status}), the codes of required value
+sets, and the definition's own rules (@secref["refused"]). R6's @tt{resourceDefinition} beside
+@tt{resourceType} is accepted.}
 
 @subsection[#:style 'unnumbered]{@tt{sql-on-fhir/operations}}
 @defmodule[sql-on-fhir/operations]
@@ -756,12 +810,15 @@ by @racket['eval-view].}
 On the IG's @tt{SQLRun} definition, registered when the module loads. The view is the subject
 (@tt{subjectResource}), or named by @tt{#:subjectCanonical} or @tt{#:subjectReference} from the
 data source. Data: @tt{#:resource} inputs (Bundles unwrapped) or the data source, filtered by
-@tt{#:patient} and @tt{#:_since}; @tt{#:_limit}. @tt{#:_format} is @racket["ndjson"] (the default),
-@racket["json"] or @racket["csv"] (with @tt{#:header}) as a Binary, or @racket["fhir"] as a
-Parameters of rows.}
+@tt{#:patient}, @tt{#:group} and @tt{#:_since}; @tt{#:_limit}. @tt{#:_format} is @racket["ndjson"]
+(the default), @racket["json"] or @racket["csv"] (with @tt{#:header}) as a Binary, or
+@racket["fhir"] as a Parameters of rows. @tt{#:parameters} is refused, as the definition says of a
+ViewDefinition.}
 @defthing[$sql-export procedure?]{
-@tt{#:subject} is a list of views, references or canonicals; completes synchronously with a manifest
-Parameters: one @tt{output} per subject, its result a Binary.}
+@tt{#:subject} is a list of views, references or canonicals (in a @tt{Parameters} resource, a
+@tt{subject} with a @tt{name} part and one of @tt{subjectResource}, @tt{subjectCanonical},
+@tt{subjectReference}); completes synchronously with a manifest Parameters: one @tt{output} per
+subject, its result a Binary. @tt{#:_format "fhir"} is refused, as the definition says.}
 @defproc[(view-rows [view hash?] [resources (or/c (listof hash?) #f) #f]) (listof hash?)]{
 Rows as hashes for a ViewDefinition given as JSON (strictly parsed); @racket[resources] default to
 the data source's.}
@@ -791,6 +848,10 @@ have, each a diagnostic at the path's place in @racket[text] (the file's own tex
 @defproc[(status-problem [file (or/c path-string? #f)] [text string?] [view hash?]) any/c]{
 A warning diagnostic when the view states no @tt{status}, at the view's opening brace; else
 @racket[#f].}
+@defproc[(version-problem [file (or/c path-string? #f)] [text string?] [view hash?] [version-name string?]) any/c]{
+A warning diagnostic when the view names the FHIR versions it is for (@tt{fhirVersion}) and
+@racket[version-name], the one the data is read as (@racket["R4"], @racket["R6"]), is none of them,
+at @tt{fhirVersion}; else @racket[#f].}
 @defproc[(with-unread [view hash?] [version-name string?] [thunk (-> any)]) (values any/c (listof string?))]{
 Calls @racket[thunk] with a read log (@racket[current-read-log]) and returns its result with one
 sentence for each element the view reads that the read of the data left out: the sentences the

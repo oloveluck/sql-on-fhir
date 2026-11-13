@@ -13,6 +13,12 @@
 ;;;
 ;;; An Element is the snapshot's JSON for one element (path, min, binding, constraint,
 ;;; contentReference). A Problem is a string: where, and what is wrong.
+;;; A Child is (child element name key choice below constraints) — an element one step below
+;;; another, as the walk over a view needs it, worked out once:
+;;;   name : its last step (`column`, `value[x]`); key : its JSON key, or #f for a choice, whose
+;;;   members' keys start with `choice` (`value`); below : the path its own children are found
+;;;   under (its own; the one a contentReference names — a nested select is a select);
+;;;   constraints : the definition's own (Listof Constraint) on what it holds
 
 (require racket/contract racket/list racket/string racket/runtime-path racket/promise
          (only-in sql-on-fhir/model/types)                  ; registers ViewDefinition over the R6 tower
@@ -45,13 +51,25 @@
 (define definition-elements               ; (listof Element)
   (delay (hash-ref (hash-ref (force definition) 'snapshot (hasheq)) 'element '())))
 
-;; definition-children : definition path -> (listof Element)   the elements one step below it
-(define (definition-children def)
-  (define prefix (string-append def "."))
-  (for/list ([e (in-list (force definition-elements))]
-             #:when (let ([p (hash-ref e 'path)])
-                      (and (string-prefix? p prefix) (not (regexp-match? #rx"[.]" p (string-length prefix))))))
-    e))
+(struct child (element name key choice below constraints))
+;; definition-children : definition path -> (listof Child)   the elements one step below it, in the
+;; definition's order (a table by parent path, built once)
+(define children-by-parent
+  (delay
+    (define elements (force definition-elements))
+    (define by-path (for/hash ([e (in-list elements)]) (values (hash-ref e 'path) e)))
+    (for/fold ([table (hash)]) ([e (in-list (reverse elements))])
+      (define steps (string-split (hash-ref e 'path) "."))
+      (define name (last steps))
+      (define choice (cond [(regexp-match #rx"^(.*)\\[x\\]$" name) => cadr] [else #f]))
+      (define below (cond [(hash-ref e 'contentReference #f) => (lambda (ref) (cadr (regexp-match #rx"#(.*)$" ref)))]
+                          [else (hash-ref e 'path)]))
+      (hash-update table (string-join (drop-right steps 1) ".")
+                   (lambda (cs) (cons (child e name (and (not choice) (string->symbol name)) choice below
+                                             (own-constraints (hash-ref by-path below #f)))
+                                      cs))
+                   '()))))
+(define (definition-children def) (hash-ref (force children-by-parent) def '()))
 
 ;; ---- reading a view -----------------------------------------------------------------------------
 (define (read-view js0)
@@ -109,25 +127,23 @@
 (define (definition-problems js node)
   (let below ([obj js] [node node] [def "ViewDefinition"] [shown #f])
     (append*
-     (for/list ([e (in-list (definition-children def))])
-       (define name (last (string-split (hash-ref e 'path) ".")))
-       (define value (member-value obj name))
+     (for/list ([c (in-list (definition-children def))])
+       (define e (child-element c))
+       (define value (member-value obj c))
        (define items (cond [(memq value '(#f null)) '()] [(list? value) value] [else (list value)]))
-       (define typed (typed-items node name))
-       (define (place i) (format "~a~a~a" (if shown (string-append shown ".") "") name (if (list? value) (format "[~a]" i) "")))
+       (define typed (typed-items node c))
+       (define (place i) (format "~a~a~a" (if shown (string-append shown ".") "") (child-name c) (if (list? value) (format "[~a]" i) "")))
        (cond
          [(pair? items)
-          (define continues (cond [(hash-ref e 'contentReference #f) => (lambda (ref) (cadr (regexp-match #rx"#(.*)$" ref)))]
-                                  [else (hash-ref e 'path)]))
           (append*
            (for/list ([item (in-list items)] [i (in-naturals)])
              (define typed-item (and (< i (length typed)) (list-ref typed i)))
-             (append (for/list ([c (in-list (own-constraints (definition-element continues)))]
-                                #:when (and typed-item (broken? c typed-item)))
-                       (format "~a~a ~a" (place i) (if (string? item) (format " ~s" item) "") (constraint-words c)))
-                     (if (hash? item) (below item typed-item continues (place i)) '()))))]
+             (append (for/list ([k (in-list (child-constraints c))]
+                                #:when (and typed-item (broken? k typed-item)))
+                       (format "~a~a ~a" (place i) (if (string? item) (format " ~s" item) "") (constraint-words k)))
+                     (if (hash? item) (below item typed-item (child-below c) (place i)) '()))))]
          [(and (>= (hash-ref e 'min 0) 1) (not (member (hash-ref e 'path) unheld-required)))
-          (list (format "~a has no `~a` (~a)" (or shown "the view") name
+          (list (format "~a has no `~a` (~a)" (or shown "the view") (child-name c)
                         (hash-ref required-words (hash-ref e 'path) (lambda () (hash-ref e 'short "required")))))]
          [else '()])))))
 ;; `status` is required by the definition (1..1) and NOT held: 33 of the 133 views the shared suite
@@ -143,18 +159,15 @@
         "ViewDefinition.where.path" "the FHIRPath condition a resource must meet"
         "ViewDefinition.constant.name" "the name paths call it by, as %name"
         "ViewDefinition.constant.value[x]" "its value, such as valueString"))
-;; definition-element : definition path -> Element | #f
-(define (definition-element path)
-  (for/first ([e (in-list (force definition-elements))] #:when (equal? (hash-ref e 'path) path)) e))
-;; member-value : object element-name -> jsexpr | #f   the element's value; of a choice, its first member's
-(define (member-value obj name)
-  (cond [(regexp-match #rx"^(.*)\\[x\\]$" name)
-         => (lambda (m) (for/first ([(k v) (in-hash obj)] #:when (string-prefix? (symbol->string k) (cadr m))) v))]
-        [else (hash-ref obj (string->symbol name) #f)]))
-;; typed-items : typed-node|#f element-name -> (listof typed value)   the element's items in the
-;; typed node, in the JSON's order (none for a choice: nothing is stated on one)
-(define (typed-items node name)
-  (define v (if (and (fhir? node) (not (regexp-match? #rx"\\[x\\]$" name))) (fhir-ref node (string->symbol name) '()) '()))
+;; member-value : object Child -> jsexpr | #f   the element's value; of a choice, its first member's
+(define (member-value obj c)
+  (cond [(child-choice c)
+         => (lambda (prefix) (for/first ([(k v) (in-hash obj)] #:when (string-prefix? (symbol->string k) prefix)) v))]
+        [else (hash-ref obj (child-key c) #f)]))
+;; typed-items : typed-node|#f Child -> (listof typed value)   the element's items in the typed
+;; node, in the JSON's order (none for a choice: nothing is stated on one)
+(define (typed-items node c)
+  (define v (if (and (fhir? node) (child-key c)) (fhir-ref node (child-key c) '()) '()))
   (cond [(list? v) v] [v (list v)] [else '()]))
 
 ;; ---- the definition's constraints ---------------------------------------------------------------
@@ -189,8 +202,8 @@
   (check-true (fhir? (read-view view)))
   (check-equal? (definition-url) "http://hl7.org/fhir/StructureDefinition/ViewDefinition")
   ;; the constraints held are the definition's own, read from it: these two, at these elements
-  (check-equal? (for*/list ([e (in-list (force definition-elements))] [c (in-list (own-constraints e))])
-                  (list (hash-ref e 'path) (hash-ref c 'key)))
+  (check-equal? (for*/list ([e (in-list (force definition-elements))] [k (in-list (own-constraints e))])
+                  (list (hash-ref e 'path) (hash-ref k 'key)))
                 '(("ViewDefinition.name" "sql-name") ("ViewDefinition.constant.name" "sql-name")
                   ("ViewDefinition.select" "sql-expressions") ("ViewDefinition.select.column.name" "sql-name")))
   ;; sql-name: the view's, a constant's and a column's name, each said where it is, with the name
@@ -209,6 +222,13 @@
   (check-equal? (read-view (hash-set view 'select (list (hasheq 'unionAll (list (column "f") (hasheq 'repeat '("item") 'forEach "item" 'column (list (hasheq 'name "f" 'path "id"))))))))
                 '("select[0].unionAll[1] has more than one of `forEach`, `forEachOrNull` and `repeat`: a select takes one"))
   (check-true (fhir? (read-view (hash-set view 'select (list (hasheq 'forEach "name" 'column (list (hasheq 'name "f" 'path "family"))))))))
+  ;; the table of children: in the definition's order; a nested select's are a select's
+  (check-equal? (map child-name (definition-children "ViewDefinition.select"))
+                '("id" "extension" "modifierExtension" "column" "select" "forEach" "forEachOrNull" "repeat" "unionAll"))
+  (check-equal? (for/list ([c (in-list (definition-children "ViewDefinition.select"))] #:when (member (child-name c) '("select" "unionAll" "column")))
+                  (list (child-below c) (map (lambda (k) (hash-ref k 'key)) (child-constraints c))))
+                '(("ViewDefinition.select.column" ()) ("ViewDefinition.select" ("sql-expressions")) ("ViewDefinition.select" ("sql-expressions"))))
+  (check-equal? (child-choice (findf (lambda (c) (equal? (child-name c) "value[x]")) (definition-children "ViewDefinition.constant"))) "value")
   ;; a constraint with no words of ours is said in the definition's, its first paragraph
   (check-equal? (constraint-words (hasheq 'key "sql-new" 'human "Only so\nmany.\n\nBecause."))  "Only so many.")
   ;; R6's `resourceDefinition` names the definition (the IG's examples carry it) and is no element

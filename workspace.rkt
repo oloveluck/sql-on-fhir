@@ -7,7 +7,7 @@
 ;;; what one resource contributes: the rows it alone produces, and whether each `where` holds for it.
 ;;; A Row is {column: value …} in the view's column order.
 
-(require racket/contract racket/list racket/string racket/match racket/runtime-path racket/file json
+(require racket/contract racket/list racket/string racket/runtime-path racket/file json
          fhir/lang/workspace
          (only-in fhir/diagnostic diagnostic diagnostic? loc exn:fail:diagnostic exn:fail:diagnostic? exn:fail:diagnostic-diagnostic)
          (only-in fhir/operation exn:fail:operation? exn:fail:operation-outcome)

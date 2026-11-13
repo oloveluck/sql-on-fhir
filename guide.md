@@ -74,8 +74,8 @@ states no `status`, a view whose `fhirVersion` is not the version the data is re
 view reads that the read left out (below).
 
 **As a module.** A file that starts with `#lang sql-on-fhir` writes the view in forms generated from
-the IG, so a misspelled element or a `status` outside its value set is a compile error. It provides
-`resources` (the typed views) and `(->json)`.
+the IG, so a misspelled element, a `status` outside its value set or a path that is not FHIRPath is
+a compile error, at its place in the file. It provides `resources` (the typed views) and `(->json)`.
 
 **As an operation.** `$sql-run` and `$sql-export` (`sql-on-fhir/operations`) are the IG's operations
 as procedures, over the current data source; `view-rows` gives the rows as hashes. `patient` and

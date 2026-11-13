@@ -161,6 +161,16 @@
   (write! "open.sof" "#lang sql-on-fhir" "(ViewDefinition (name \"patients\")")
   (check-equal? (run "open.sof" "patients")
                 (list 1 "" "sql-on-fhir: open.sof:2:0: read-syntax: expected a `)` to close `(`\n"))
+  ;; a path that is not FHIRPath is a compile error too, at its string (the model knows a path as a
+  ;; string: the file compiled, and failed when it ran over data)
+  (write! "bad-path.sof" "#lang sql-on-fhir"
+          "(ViewDefinition (name \"patients\") (status \"active\") (resource \"Patient\")"
+          " (select (ViewDefinitionSelect (forEach \"name\")"
+          "          (column (ViewDefinitionSelectColumn (name \"family\") (path \"family.\"))))))")
+  (check-equal? (run "bad-path.sof")
+                (list 1 "" (string-append "sql-on-fhir: bad-path.sof:4:68: ViewDefinition: the path \"family.\" is not FHIRPath: the expression ends after `.`\n"
+                                          "  at: \"family.\"\n"
+                                          "  in: (path \"family.\")\n")))
   ;; a required form left out: the form macros' own source position is not the user's, and is dropped
   (write! "no-resource.sof" "#lang sql-on-fhir" "(ViewDefinition (status \"active\"))")
   (define missing (run "no-resource.sof"))
