@@ -23,22 +23,40 @@
 ;;;
 ;;; A Row is an ordered (Listof (cons Symbol jsexpr)) — order carries column order for
 ;;; expectColumns; compare as hashes for row equality.
+;;;
+;;; The typed node is COMPILED once, before any resource is read, into the data the evaluator recurs on:
+;;;
+;;; A View is (view type consts wheres selects)
+;;;   type : Symbol, the resource type read; consts : the %externals (name -> one-item collection);
+;;;   wheres : (Listof Expr); selects : (Listof Sel)
+;;; A Sel is (sel iteration columns selects unions) — one select item:
+;;;   columns : (Listof Col); selects, unions : (Listof Sel) (nested `select`, `unionAll` branches)
+;;; An Iteration is one of
+;;;   #f                      the item's rows over the focus it is given
+;;;   (each expr or-null?)    over each element of the path (`forEach`); none: no row, or, with
+;;;                           or-null? (`forEachOrNull`), the one null row
+;;;   (repeat exprs)          over every element reached by following the paths to any depth
+;;; A Col is (col name expr collection?) — name : Symbol
+;;; An Expr is (expr text ast verdicts) — a path parsed once, getResourceKey/getReferenceKey
+;;;   rewritten; verdicts : focus type -> #f | exn, the static pass's answer, asked once per type
+;;;
+;;; What can be told of a view without data is told when it is compiled, as an `exn:fail:view`: a
+;;; path that does not parse, `unionAll` branches whose columns differ, a column name used twice, no
+;;; `resource`. What depends on the data (a column with several values, a `where` that is no
+;;; boolean, an unknown %constant) is an `exn:fail` when a resource meets it.
 
 (require racket/contract racket/match racket/list racket/string
          (only-in fhir/model/node fhir? fhir-ref fhir-type)
-         (only-in fhir/model/base primitive-type? primitive-type-value)
+         (only-in fhir/model/base primitive-type?)
          (only-in fhir/model/leaf pv)
          (only-in fhir/primitives/primitives primitive->jsexpr)
+         (only-in fhir/diagnostic exn:fail:diagnostic? exn:fail:diagnostic-diagnostic diagnostic-message)
          (only-in fhirpath/parser/parse parse-fhirpath)
-         (only-in fhirpath/parser/ast fp-call fp-call? fp-call-target fp-call-name fp-call-args
-                  fp-invoke fp-invoke? fp-invoke-target fp-invoke-name
-                  fp-binop fp-binop? fp-binop-op fp-binop-lhs fp-binop-rhs
-                  fp-unop fp-unop? fp-unop-op fp-unop-operand
-                  fp-index fp-index? fp-index-target fp-index-idx
-                  fp-typeop fp-typeop? fp-typeop-op fp-typeop-operand fp-typeop-type
-                  fp-lit)
-         (only-in fhirpath/eval eval-fhirpath)
-         (only-in fhirpath/value item->system fp-quantity? fp-long? fp-long-v)
+         (only-in fhirpath/parser/ast fp-call fp-invoke fp-binop fp-unop fp-index fp-typeop fp-lit)
+         (only-in fhirpath/eval fp-eval)
+         (only-in fhirpath/analyze analyze)
+         (only-in fhirpath/environment make-env)
+         (only-in fhirpath/value item->system fp-long? fp-long-v)
          (only-in fhirpath/decimal fp-decimal? decimal->string)
          (only-in fhirpath/temporal-ops moment? moment->string moment-kind)
          (only-in fhir/serialize/to-json node->jsexpr))
@@ -49,164 +67,196 @@
   [eval-view    (-> fhir? (listof fhir?) (listof list?))]
   ;; view-columns : the view's column names, in declaration order
   [view-columns (-> fhir? (listof symbol?))]
+  ;; a view refused before any data is read (the message says why); `path` is the path's text when
+  ;; the problem is one path's syntax, else #f
+  [struct (exn:fail:view exn:fail) ([message string?] [continuation-marks continuation-mark-set?] [path (or/c string? #f)])]
   ;; rewrite-sof : FHIRPath AST -> AST   getResourceKey()/getReferenceKey(Type) as plain FHIRPath (the
   ;; workspace checks a view's paths after it, as the engine evaluates them)
   [rewrite-sof  (-> any/c any/c)]))
 
+(struct view (type consts wheres selects))
+(struct sel (iteration columns selects unions))
+(struct each (expr or-null?))
+(struct repeat (exprs))
+(struct col (name expr collection?))
+(struct expr (text ast verdicts))
+(struct exn:fail:view exn:fail (path))
+
+;; refuse : (or/c string #f) format-string value … -> raises exn:fail:view
+(define (refuse path fmt . args)
+  (raise (exn:fail:view (string-append "eval-view: " (apply format fmt args)) (current-continuation-marks) path)))
+
 ;; ---- typed-node field helpers ----------------------------------------------
-;; fld : node key -> value|#f ; flds : node key -> (Listof value) ; pv from model/leaf
+;; fld : node key -> value|#f ; flds : node key -> (Listof value) ; pstr : node key -> scalar|#f
 (define (fld n k) (fhir-ref n k #f))
 (define (flds n k) (define v (fhir-ref n k '())) (if (list? v) v (list v)))
 (define (pstr n k) (let ([v (fld n k)]) (and v (pv v))))
 
+;; ---- compiling: ViewDefinition node -> View ----------------------------------
+;; compile-view : node -> View   raises exn:fail:view
+(define (compile-view node)
+  (define type (or (pstr node 'resource) (refuse #f "the view has no `resource` (the type of resource it reads)")))
+  (define selects (map compile-select (flds node 'select)))
+  (cond [(check-duplicates (append-map sel-names selects))
+         => (lambda (name) (refuse #f "the column name `~a` is used twice: the columns of a table are named apart" name))])
+  (view (string->symbol type) (constants-env node)
+        (for/list ([w (in-list (flds node 'where))]) (compile-path (pstr w 'path) "a `where`"))
+        selects))
+
+;; compile-select : select node -> Sel   `unionAll` branches agree on column names AND order
+(define (compile-select s)
+  (define each-path (or (pstr s 'forEach) (pstr s 'forEachOrNull)))
+  (define repeats (map pv (flds s 'repeat)))
+  (define unions (map compile-select (flds s 'unionAll)))
+  (define shapes (map sel-names unions))
+  (unless (or (null? shapes) (andmap (lambda (sh) (equal? sh (car shapes))) (cdr shapes)))
+    (refuse #f "unionAll branches disagree on columns: ~a" shapes))
+  (sel (cond [(pair? repeats) (repeat (for/list ([p (in-list repeats)]) (compile-path p "a `repeat`")))]
+             [each-path (each (compile-path each-path "a `forEach`") (and (pstr s 'forEachOrNull) #t))]
+             [else #f])
+       (for/list ([c (in-list (flds s 'column))])
+         (col (string->symbol (or (pstr c 'name) (refuse #f "a column has no `name`")))
+              (compile-path (pstr c 'path) (format "column `~a`" (pstr c 'name)))
+              (eq? (pstr c 'collection) #t)))
+       (map compile-select (flds s 'select))
+       unions))
+
+;; sel-names : Sel -> (Listof Symbol)   its columns in declaration order: its own, its nested
+;; selects', its first unionAll branch's (the branches agree)
+(define (sel-names s)
+  (append (map col-name (sel-columns s))
+          (append-map sel-names (sel-selects s))
+          (if (pair? (sel-unions s)) (sel-names (car (sel-unions s))) '())))
+
+;; compile-path : string|#f owner -> Expr   parsed once, the SOF-specific calls rewritten; `owner`
+;; says whose path it is when there is none, or it does not parse
+(define (compile-path text owner)
+  (unless (string? text) (refuse #f "~a has no `path`" owner))
+  (define ast
+    (with-handlers ([exn:fail:diagnostic?
+                     (lambda (e) (refuse text "the path ~s is not FHIRPath: ~a" text
+                                         (diagnostic-message (exn:fail:diagnostic-diagnostic e))))])
+      (parse-fhirpath text)))
+  (expr text (rewrite-sof ast) (make-hasheq)))
+
+;; constants-env : node -> (Hash String Collection)   view.constant as %externals: the first value[x]
+;; a constant carries, as a one-item collection
+(define (constants-env node)
+  (for/fold ([h (hash)]) ([c (in-list (flds node 'constant))])
+    (hash-set h (pstr c 'name) (for/or ([n (in-list constant-value-keys)]) (let ([v (fld c n)]) (and v (list v)))))))
+(define constant-value-keys
+  '(valueBase64Binary valueBoolean valueCanonical valueCode valueDate valueDateTime
+    valueDecimal valueId valueInstant valueInteger valueInteger64 valueOid
+    valuePositiveInt valueString valueTime valueUnsignedInt valueUri valueUrl valueUuid))
+
 ;; ---- entry ------------------------------------------------------------------
-(define (eval-view view resources)
-  (define consts (constants-env view))
-  (define wheres (for/list ([w (in-list (flds view 'where))]) (parse-path (pstr w 'path))))
-  (define rtype (string->symbol (or (pstr view 'resource)
-                                    (error 'eval-view "the view has no `resource` (the type of resource it reads)"))))
-  (define sels (flds view 'select))
+(define (eval-view node resources)
+  (define v (compile-view node))
+  (define consts (view-consts v))
   (append*
    (for/list ([r (in-list resources)]
-              #:when (eq? (fhir-type r) rtype)
-              #:when (passes-wheres? r wheres consts))
-     (product-rows sels r consts 0))))
+              #:when (eq? (fhir-type r) (view-type v))
+              #:when (passes-wheres? r (view-wheres v) consts))
+     (product (for/list ([s (in-list (view-selects v))]) (sel-rows s r consts 0))))))
 
 ;; the resource must satisfy every where path — a where evaluating to a non-boolean is a VIEW error
 (define (passes-wheres? r wheres consts)
-  (for/and ([ast (in-list wheres)])
-    (define v (map item->system (eval-path ast r consts 0)))
+  (for/and ([x (in-list wheres)])
+    (define v (map item->system (eval-expr x r consts 0)))
     (cond [(null? v) #f]
           [(and (null? (cdr v)) (boolean? (car v))) (car v)]
           [else (error 'eval-view "where path must resolve to a boolean, got ~a" v)])))
 
 ;; view-columns : declaration-order column names (for expectColumns)
-(define (view-columns view)
-  (define (of-sel s)
-    (append (for/list ([c (in-list (flds s 'column))]) (string->symbol (pstr c 'name)))
-            (append-map of-sel (flds s 'select))
-            (let ([u (flds s 'unionAll)]) (if (pair? u) (of-sel (car u)) '()))))
-  (append-map of-sel (flds view 'select)))
+(define (view-columns node) (append-map sel-names (view-selects (compile-view node))))
 
 ;; ---- the structural recursion over select items -----------------------------
-;; product-rows : (Listof Sel) focus consts idx -> (Listof Row)   cartesian product of item row-sets
-(define (product-rows sels focus consts idx)
-  (for/fold ([rows (list '())])
-            ([s (in-list sels)])
-    (define item-rows (sel-rows s focus consts idx))
-    (for*/list ([base (in-list rows)] [add (in-list item-rows)]) (append base add))))
+;; product : (Listof (Listof Row)) -> (Listof Row)   the cartesian product of row-sets, each row the
+;; concatenation of one row from every set, in order
+(define (product row-sets)
+  (for/fold ([rows (list '())]) ([set (in-list row-sets)])
+    (for*/list ([base (in-list rows)] [add (in-list set)]) (append base add))))
 
 ;; sel-rows : Sel focus consts idx -> (Listof Row)   the rows of ONE select item
 (define (sel-rows s focus consts idx)
-  (define fe (pstr s 'forEach))
-  (define feon (pstr s 'forEachOrNull))
-  (define rep (map pv (flds s 'repeat)))
-  (cond
-    [(pair? rep)
-     (define elems (transitive-closure rep focus consts))
-     (if (null? elems) '() (append* (for/list ([e (in-list elems)] [i (in-naturals)]) (item-rows s e consts i))))]
-    [(or fe feon)
-     (define ast (parse-path (or fe feon)))       ; parse errors surface (an invalid view must error)
-     (define elems (eval-tolerant ast focus consts idx))
-     (cond
-       [(pair? elems) (append* (for/list ([e (in-list elems)] [i (in-naturals)]) (item-rows s e consts i)))]
-       [feon (list (null-row s consts))]          ; forEachOrNull: one row evaluated over the empty focus
-       [else '()])]                               ; forEach: eliminates the row
-    [else (item-rows s focus consts idx)]))
+  (match (sel-iteration s)
+    [#f (item-rows s focus consts idx)]
+    [(each x or-null?)
+     (define elems (eval-tolerant x focus consts idx))
+     (cond [(pair? elems) (rows-over s elems consts)]
+           [or-null? (list (null-row s consts))]          ; forEachOrNull: one row over the empty focus
+           [else '()])]                                   ; forEach: eliminates the row
+    [(repeat xs) (rows-over s (transitive-closure xs focus consts) consts)]))
+
+;; rows-over : Sel (Listof focus) consts -> (Listof Row)   the item's rows at each focus, %rowIndex
+;; its ordinal
+(define (rows-over s foci consts)
+  (append* (for/list ([f (in-list foci)] [i (in-naturals)]) (item-rows s f consts i))))
 
 ;; item-rows : the rows of a select item at ONE focus — its own columns × nested selects × unionAll
 (define (item-rows s focus consts idx)
-  (define col-row (columns-row (flds s 'column) focus consts idx))
-  (define parts
-    (append (if col-row (list (list col-row)) '())
-            (for/list ([sub (in-list (flds s 'select))]) (sel-rows sub focus consts idx))
-            (let ([u (flds s 'unionAll)])
-              (cond [(null? u) '()]
-                    [else
-                     ;; branches must agree on column names AND order — a structural view error
-                     (define shapes (map branch-columns u))
-                     (unless (andmap (lambda (sh) (equal? sh (car shapes))) (cdr shapes))
-                       (error 'eval-view "unionAll branches disagree on columns: ~a" shapes))
-                     (list (append* (for/list ([b (in-list u)]) (sel-rows b focus consts idx))))]))))
-  (for/fold ([rows (list '())]) ([p (in-list parts)])
-    (for*/list ([base (in-list rows)] [add (in-list p)]) (append base add))))
+  (product
+   (append (if (pair? (sel-columns s))
+               (list (list (for/list ([c (in-list (sel-columns s))])
+                             (cons (col-name c) (cell c (eval-expr (col-expr c) focus consts idx))))))
+               '())
+           (for/list ([sub (in-list (sel-selects s))]) (sel-rows sub focus consts idx))
+           (if (pair? (sel-unions s))
+               (list (append* (for/list ([b (in-list (sel-unions s))]) (sel-rows b focus consts idx))))
+               '()))))
 
-;; branch-columns : Sel -> the branch's ordered column names (for unionAll congruence checking)
-(define (branch-columns s)
-  (append (for/list ([c (in-list (flds s 'column))]) (pstr c 'name))
-          (append-map branch-columns (flds s 'select))
-          (let ([u (flds s 'unionAll)]) (if (pair? u) (branch-columns (car u)) '()))))
-
-;; columns-row : (Listof Column) focus -> Row|#f   one row of column values (or #f when no columns)
-(define (columns-row cols focus consts idx)
-  (and (pair? cols)
-       (for/list ([c (in-list cols)])
-         (define items (eval-path (parse-path (pstr c 'path)) focus consts idx))
-         (define collection? (eq? (pstr c 'collection) #t))
-         (cons (string->symbol (pstr c 'name))
-               (cond
-                 [collection? (map item->jsexpr items)]
-                 [(null? items) 'null]
-                 [(null? (cdr items)) (item->jsexpr (car items))]
-                 [else (error 'eval-view "column ~a: path yields ~a items without collection=true"
-                              (pstr c 'name) (length items))])))))
+;; cell : Col (Listof item) -> jsexpr   a column's value: a list when `collection`, else null or
+;; the one item — several without `collection` is an error
+(define (cell c items)
+  (cond [(col-collection? c) (map item->jsexpr items)]
+        [(null? items) 'null]
+        [(null? (cdr items)) (item->jsexpr (car items))]
+        [else (error 'eval-view "column ~a: path yields ~a items without collection=true" (col-name c) (length items))]))
 
 ;; null-row : the forEachOrNull empty case — each column path is evaluated over the EMPTY collection
 ;; (so element navigation propagates to null, while focus-independent paths like %rowIndex still
-;; produce their value), recursing into nested/unionAll column sets
+;; produce their value; of several values the first), recursing into nested/unionAll column sets
 (define (null-row s consts)
-  (append (for/list ([c (in-list (flds s 'column))])
+  (append (for/list ([c (in-list (sel-columns s))])
             (define items (with-handlers ([exn:fail? (lambda (_) '())])
-                            (eval-fhirpath (parse-path (pstr c 'path)) '()
-                                           #:externals (hash-set consts "rowIndex" (list 0))
-                                           #:strict? #f)))
-            (cons (string->symbol (pstr c 'name))
-                  (cond [(eq? (pstr c 'collection) #t) (map item->jsexpr items)]
-                        [(null? items) 'null]
-                        [else (item->jsexpr (car items))])))
-          (append-map (lambda (sub) (null-row sub consts)) (flds s 'select))
-          (let ([u (flds s 'unionAll)]) (if (pair? u) (null-row (car u) consts) '()))))
+                            (fp-eval (expr-ast (col-expr c)) '() (make-env '() #:externals (hash-set consts "rowIndex" (list 0))))))
+            (cons (col-name c) (cell c (if (or (col-collection? c) (null? items)) items (list (car items))))))
+          (append-map (lambda (sub) (null-row sub consts)) (sel-selects s))
+          (if (pair? (sel-unions s)) (null-row (car (sel-unions s)) consts) '())))
 
-;; transitive-closure : (Listof path-string) focus -> all descendants reached by repeatedly applying
+;; transitive-closure : (Listof Expr) focus -> all descendants reached by repeatedly applying
 ;; the paths, in DEPTH-FIRST preorder (matching the reference's row/index order); elements lacking
 ;; the path simply contribute nothing (a repeat path is inherently heterogeneous)
-(define (transitive-closure paths focus consts)
-  (define asts (map parse-path paths))
-  (define (step f)
-    (append* (for/list ([a (in-list asts)]) (eval-tolerant a f consts 0))))
+(define (transitive-closure xs focus consts)
   (let walk ([node focus])
-    (append* (for/list ([child (in-list (step node))])
+    (append* (for*/list ([x (in-list xs)] [child (in-list (eval-tolerant x node consts 0))])
                (cons child (walk child))))))
 
-;; ---- constants + path evaluation --------------------------------------------
-;; the %-externals hash from view.constant (value[x] -> a one-item collection) — computed once
-(define (constants-env view)
-  (for/fold ([h (hash)]) ([c (in-list (flds view 'constant))])
-    (hash-set h (pstr c 'name) (constant-value c))))
+;; ---- path evaluation --------------------------------------------------------
+;; static-problem : Expr focus -> exn | #f   what FHIRPath's static pass says of the path over the
+;; focus's type (an element the type lacks). It depends on the type alone, so it is asked once per
+;; type, not once per resource and cell.
+(define (static-problem x focus)
+  (and (fhir? focus)
+       (hash-ref! (expr-verdicts x) (fhir-type focus)
+                  (lambda () (with-handlers ([exn:fail? values])
+                               (analyze (expr-ast x) (fhir-type focus) #:strict? #f)
+                               #f)))))
 
-;; the first value[x] field on a constant node (Coding of kinds is irrelevant — take any value*)
-(define (constant-value c)
-  (define names '(valueBase64Binary valueBoolean valueCanonical valueCode valueDate valueDateTime
-                  valueDecimal valueId valueInstant valueInteger valueInteger64 valueOid
-                  valuePositiveInt valueString valueTime valueUnsignedInt valueUri valueUrl valueUuid))
-  (for/or ([n (in-list names)]) (let ([v (fld c n)]) (and v (list v)))))
+;; eval-expr : Expr focus consts idx -> (Listof item)   what `eval-fhirpath` does (the static pass,
+;; then the evaluation), the first once per focus type
+(define (eval-expr x focus consts idx)
+  (cond [(static-problem x focus) => raise]
+        [else (fp-eval (expr-ast x) (list focus)
+                       (make-env (list focus) #:externals (hash-set consts "rowIndex" (list idx))))]))
 
-;; parse-path : string -> AST  (memoized by parse-fhirpath) with the SOF-specific calls rewritten
-(define (parse-path s) (rewrite-sof (parse-fhirpath s)))
-
-;; eval-path : AST focus consts idx -> (Listof item)
-(define (eval-path ast focus consts idx)
-  (eval-fhirpath ast (list focus)
-                 #:externals (hash-set consts "rowIndex" (list idx))
-                 #:strict? #f))
-
-;; eval-tolerant : like eval-path, but an UNKNOWN-ELEMENT navigation yields no elements (forEach and
-;; repeat paths are applied to heterogeneous foci); every other error — bad syntax, unknown
-;; %constant, type errors — still surfaces as a view error
-(define (eval-tolerant ast focus consts idx)
+;; eval-tolerant : like eval-expr, but an UNKNOWN-ELEMENT navigation yields no elements (forEach and
+;; repeat paths are applied to heterogeneous foci); every other error — an unknown %constant, type
+;; errors — still surfaces as a view error
+(define (eval-tolerant x focus consts idx)
   (with-handlers ([(lambda (e) (and (exn:fail? e) (regexp-match? #px"no element" (exn-message e))))
                    (lambda (_) '())])
-    (eval-path ast focus consts idx)))
+    (eval-expr x focus consts idx)))
 
 ;; ---- SOF-specific function rewrite ------------------------------------------
 ;; getResourceKey() -> id ; X.getReferenceKey([Type]) ->
