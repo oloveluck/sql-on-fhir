@@ -32,7 +32,7 @@
          (only-in "definition.rkt" read-view)
          (only-in fhir/serialize/from-json from-json)
          (only-in fhir/result/result ok? ok-value)
-         (only-in fhir/serialize/lenient lenient-drops)
+         (only-in fhir/serialize/lenient node-drops)
          (only-in fhirpath/temporal-ops parse-fp-datetime moment-compare))
 
 (provide
@@ -42,8 +42,9 @@
   [$sql-export operation?]
   ;; what the lenient read of the data left out, for a caller that wants to say so: while
   ;; `current-read-log` holds a log (`make-read-log`), every resource a view reads is counted
-  ;; (`read-log-count`) and each one whose read dropped values is kept with them (`read-log-reads`:
-  ;; (cons resource drops), drops a list of fhir/serialize/lenient Drops, or 'unreadable)
+  ;; (`read-log-count`) and, once it ran, each one whose read left out values the view read is
+  ;; answered with them (`read-log-reads`: (cons resource drops), drops a list of
+  ;; fhir/serialize/lenient Drops, or 'unreadable)
   [current-read-log (parameter/c (or/c #f read-log?))]
   [make-read-log (-> read-log?)]
   [read-log? (-> any/c boolean?)]
@@ -69,21 +70,29 @@
 (define (of-type resources type)
   (filter (lambda (r) (equal? (hash-ref r 'resourceType #f) type)) resources))
 ;; typed-resource : resource jsexpr -> typed node | #f   read leniently: an element the tower lacks
-;; and a value that does not parse are left out, and noted in the read log when there is one
+;; and a value that does not parse are left out. The node is lazy (fhir/model/node): only what the
+;; view reads of it is read. With a read log, the resource is noted with its node, and what was left
+;; out is asked of it when the log is read — after the view ran, so it is what the view read and
+;; could not (`node-drops #:read-only? #t`), not the whole resource's.
 (define (typed-resource js)
   (define r (from-json js #:lenient? #t))
   (define node (and (ok? r) (ok-value r)))
   (define log (current-read-log))
   (when log
     (set-read-log-count! log (add1 (read-log-count log)))
-    (define drops (if node (lenient-drops js node) 'unreadable))
-    (unless (null? drops) (set-read-log-entries! log (cons (cons js drops) (read-log-entries log)))))
+    (set-read-log-entries! log (cons (cons js (or node 'unreadable)) (read-log-entries log))))
   node)
-;; A ReadLog is (read-log count entries): how many resources were read, and the Reads that lost
-;; something, newest first.
+;; A ReadLog is (read-log count entries): how many resources were read, and each with its node
+;; (or 'unreadable), newest first.
 (struct read-log (count entries) #:mutable)
 (define (make-read-log) (read-log 0 '()))
-(define (read-log-reads log) (reverse (read-log-entries log)))
+;; read-log-reads : ReadLog -> (listof (cons resource (or/c Drops 'unreadable)))   the resources whose
+;; read left something out of what has been read of them
+(define (read-log-reads log)
+  (for*/list ([e (in-list (reverse (read-log-entries log)))]
+              [d (in-value (if (eq? (cdr e) 'unreadable) 'unreadable (node-drops (cdr e) #:read-only? #t)))]
+              #:unless (null? d))
+    (cons (car e) d)))
 (define current-read-log (make-parameter #f))
 
 ;; subject-view : Inputs -> ViewDefinition jsexpr   the view named by the inputs: inline (the

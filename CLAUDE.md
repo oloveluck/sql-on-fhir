@@ -194,3 +194,11 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
     no text. fhir/operation's `parameters->inputs` takes a parameter's first TRUE value, so
     `valueBoolean: false` arrives as the parameter object. The generated strict parse knows no
     `resourceDefinition` (any R6 additional resource meets that).
+
+- **The read log reads what the view read** (2026-11-15): resources are read leniently into LAZY
+  nodes (fhir/model/node; the main repo's CLAUDE.md, "A lenient read is lazy"), so a view reads only
+  the objects its paths reach. `typed-resource` notes each resource with its node, and
+  `read-log-reads` asks the node, after the view ran, for what its read left out
+  (`node-drops #:read-only? #t`); it computed every resource's drops up front by writing the node
+  back as JSON (`lenient-drops`). The notes are the same: `unread.rkt` still keeps what a chain
+  reads, and every chain's objects were read. All 295 tests unchanged.
