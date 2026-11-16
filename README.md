@@ -1,8 +1,8 @@
 # sql-on-fhir — SQL on FHIR
 
-> Part of [fhir](https://github.com/oloveluck/fhir), a FHIR implementation designed to be used by
-> AI agents: one line per problem, at its place, with what would fix it; a guide written for an
-> agent to read; the same language inside the `fhir-mcp` workspace.
+> Part of [fhir](https://github.com/oloveluck/fhir), a toolkit for AI agents on FHIR: an
+> agent reads and writes FHIR's languages, and the JSON is what they compile to. A view makes a
+> table an agent queries in SQL in one call; a mistake is one line, at its place in the view.
 
 A FHIR record is a nested document: a patient holds a list of names, each with its own parts. A
 table has rows and columns. [SQL on FHIR](https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/) is the
