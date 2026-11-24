@@ -2,7 +2,7 @@
 @; Text in @tt is shown exactly as written: no curly quotes, and "--" stays two hyphens.
 @(require (only-in scribble/core [element literal-element]))
 @(define (tt . text) (literal-element (quote tt) text))
-@(require (for-label racket/base racket/contract sql-on-fhir/features sql-on-fhir/view sql-on-fhir/definition sql-on-fhir/operations sql-on-fhir/workspace))
+@(require (for-label racket/base racket/contract sql-on-fhir/features sql-on-fhir/compile sql-on-fhir/sof sql-on-fhir/decompile sql-on-fhir/view sql-on-fhir/definition sql-on-fhir/operations sql-on-fhir/workspace))
 
 @; a path shown inline, with its single quotes kept straight (plain @tt would curl them)
 @(define (path . strs) (tt (literal (apply string-append strs))))
@@ -39,6 +39,7 @@ id: @secref["keys"].}
 FHIR system: @secref["formats"].}
 @item{@bold{Use a view from a program}, as rows in Racket or as a FHIR operation over HTTP:
 @secref["racket"] and @secref["operation"].}
+@item{@bold{Write a view as text}, a short SQL-like file, in place of the JSON: @secref["text"].}
 @item{@bold{See everything the package does, as one list}, with what it does not do:
 @secref["features"].}]
 
@@ -119,6 +120,83 @@ $ raco sql-on-fhir run given2.view.json data/
 {"given":["Ann","Marie"],"id":"ann"}
 {"given":["Bob"],"id":"bob"}
 }|
+
+@section[#:tag "text"]{A view as text}
+
+The standard defines a view as JSON, and the rest of this manual explains views in that form,
+because it is the form other tools read. You do not have to write it. This package also reads a
+view as @italic{source text}: SQL's clauses, with a path into the record wherever SQL would have
+an expression. A file of it ends in @tt{.sof}. This is the view of the first example:
+
+@verbatim|{
+-- patients.sof: one row to a patient
+CREATE VIEW patients WITH (status = 'active') AS
+SELECT
+  getResourceKey() AS id,
+  name.family.first() AS family,
+  gender,
+  birthDate AS birth_date
+FROM Patient
+}|
+
+It runs as the JSON does:
+
+@verbatim|{
+$ raco sql-on-fhir run patients.sof data/ --format csv
+id,family,gender,birth_date
+ann,Lee,female,1974-12-25
+bob,Ortiz,male,1990-03-01
+}|
+
+The text is a second way to write the same thing, and nothing more: it is turned into the
+standard's JSON before anything runs, and the two forms turn into each other without loss.
+@tt{raco sql-on-fhir compile patients.sof} prints the JSON a text states, and @tt{decompile} goes
+the other way:
+
+@verbatim|{
+$ raco sql-on-fhir decompile bp_readings.view.json
+CREATE VIEW bp_readings
+  WITH (status = 'active')
+AS
+SELECT
+  getResourceKey() AS id,
+  subject.getReferenceKey(Patient) AS patient,
+  effective.ofType(dateTime) AS date,
+  (SELECT
+     code.coding.code.first() AS code,
+     value.ofType(Quantity).value AS value
+   FROM component)
+FROM Observation
+WHERE code.coding.exists(system = 'http://loinc.org' and code = '85354-9')
+}|
+
+Each part of a view described in the next section has its place in the text:
+
+@tabular[#:style 'boxed #:sep @hspace[2]
+(list (list @bold{In the text} @bold{In the JSON} @bold{Section})
+      (list @tt{FROM Patient} @tt{resource} @secref["columns"])
+      (list @tt{path AS name} @elem{a column's @tt{path} and @tt{name}} @secref["columns"])
+      (list @tt{(SELECT … FROM path)} @tt{forEach} @secref["rows"])
+      (list @tt{FROM path OR NULL} @tt{forEachOrNull} @secref["rows"])
+      (list @tt{WHERE path AND path} @tt{where} @secref["where"])
+      (list @tt{DECLARE name = value} @tt{constant} "Naming a value once")
+      (list @tt{(SELECT … UNION ALL SELECT …)} @tt{unionAll} "Stacking rows")
+      (list @tt{FROM REPEAT path, path} @tt{repeat} "Stacking rows")
+      (list @tt{CREATE VIEW name WITH (status = 'active') AS} @elem{@tt{name}, @tt{status} and the view's other parts} @secref["first"]))]
+
+Two rules are worth knowing before you write one. The language's own words are written in
+capitals (@tt{SELECT}, @tt{FROM}, @tt{AS}, @tt{WHERE}); the words of a path are lower case, so
+the two cannot be confused. And a column that is just one part of the record (@tt{gender}) needs
+no @tt{AS}; any longer path does, and the message says so:
+
+@verbatim|{
+$ raco sql-on-fhir run bad-column.sof data/
+sql-on-fhir: bad-column.sof:2:3: this column needs a name: write `name.family AS <name>`
+}|
+
+The repository's @tt{LANGUAGE.md} is the definition of the language: every token, the grammar,
+what each part compiles to, and what it cannot say. Its examples are compiled by the package's
+tests.
 
 @section{Writing a view}
 
@@ -417,7 +495,9 @@ reading stopped.}]
 The command you will use is @tt{run}. The others are for people working on the package itself.
 
 @tabular[#:style 'boxed #:sep @hspace[2]
-(list (list @tt{raco sql-on-fhir run view.json data/ [--format ndjson|json|csv|fhir] [--fhir-version 4.0.1|5.0.0|6.0.0]} @elem{a view (JSON, or a @hash-lang[] @tt{sql-on-fhir} module of any extension) over a directory, Bundle or resource})
+(list (list @tt{raco sql-on-fhir run view.sof data/ [--format ndjson|json|csv|fhir] [--fhir-version 4.0.1|5.0.0|6.0.0]} @elem{a view (source text, JSON, or a @hash-lang[] @tt{sql-on-fhir} module of any extension) over a directory, Bundle or resource})
+      (list @tt{raco sql-on-fhir compile view.sof [-o dir]} @elem{the views a text states, as the standard's JSON; with @tt{-o}, each in a file of that folder (@secref["text"])})
+      (list @tt{raco sql-on-fhir decompile view.json} "a view given as JSON, as text")
       (list @tt{raco sql-on-fhir features [<table>] [--json]} @elem{everything the package does, as a list (@secref["features"])})
       (list @tt{raco sql-on-fhir tck [-v]} @elem{the shared test suite, with its report; @tt{-v} prints each failure})
       (list @tt{raco sql-on-fhir regen} @elem{regenerate the ViewDefinition model from the specification's package in @tt{spec/}})
@@ -837,7 +917,7 @@ Each top-level form builds a typed ViewDefinition; the module provides @racket[r
 @defmodule[sql-on-fhir #:no-declare]
 
 @racket[(require sql-on-fhir)] provides everything the modules below provide, but
-@racketmodname[sql-on-fhir/workspace]'s: the two operations and @racket[view-rows], the formats,
+@racketmodname[sql-on-fhir/workspace]'s: the source text's functions, the two operations and @racket[view-rows], the formats,
 the read log, @racket[read-view], the engine, and the feature list. It loads the view model, which
 is built over FHIR R6. A program that reads data as R4 or R5 loads that version's types first and
 keeps them, and only then loads this module:
@@ -850,6 +930,38 @@ keeps them, and only then loads this module:
 
 With that, a column reading R4's @tt{medication.ofType(CodeableConcept).text} has its value;
 without it the record is read as R6, which has no such element, and the cell is empty.
+
+@subsection[#:style 'unnumbered]{@tt{sql-on-fhir/compile}}
+@defmodule[sql-on-fhir/compile]
+
+Source text (@secref["text"]) to ViewDefinitions.
+
+@defproc[(sof->views [text string?] [source any/c #f]) (listof hash?)]{
+The ViewDefinitions a source text states (@secref["text"]), as JSON, one to a statement. A problem
+of the text is raised as an @tt{exn:fail:diagnostic} at its line and column; @racket[source] names
+the file in it. This translates and checks the text; whether each result is a view by the
+standard's definition is @racket[read-sof]'s to say.}
+@defstruct[compiled ([view hash?] [loc any/c])]{A compiled statement: its ViewDefinition, and where the statement begins.}
+@defproc[(compile-sof [text string?] [source any/c #f]) (listof compiled?)]{As @racket[sof->views], each view with its place.}
+@subsection[#:style 'unnumbered]{@tt{sql-on-fhir/sof}}
+@defmodule[sql-on-fhir/sof]
+
+@defproc[(read-sof [text string?] [source any/c #f]) (listof compiled?)]{
+As @racket[compile-sof], and each result held to what a view is: the standard's definition
+(@racket[read-view]) and what the engine refuses before it reads data. A problem is raised at the
+statement it is about.}
+@defproc[(source-text? [text string?]) boolean?]{
+Whether a file's text is source text: it is, unless it begins (after white space, comments and a
+@hash-lang[] line) with @tt["{"], @tt{[} or @tt{(}.}
+@subsection[#:style 'unnumbered]{@tt{sql-on-fhir/decompile}}
+@defmodule[sql-on-fhir/decompile]
+
+@defproc[(view->sof [view hash?]) string?]{
+A ViewDefinition as the statement that compiles to exactly it. Raises
+@racket[exn:fail:unwritable] when the view holds something the language has no place for (an
+element's own id or extensions below the top level, an empty list).}
+@defproc[(views->sof [views (listof hash?)]) string?]{Several, as one file's text: each statement ended by @tt{;}.}
+@defstruct[(exn:fail:unwritable exn:fail:user) ()]{What @racket[view->sof] raises, its message saying what cannot be written.}
 
 @subsection[#:style 'unnumbered]{@tt{sql-on-fhir/features}}
 @defmodule[sql-on-fhir/features]

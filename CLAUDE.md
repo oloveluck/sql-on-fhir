@@ -3,6 +3,51 @@
 Part of the fhir family (conventions, HTDP style and the package map live in the main `fhir` repo's
 CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
 
+- **The source language** (2026-11-24; `LANGUAGE.md` is its definition). The owner: "I also want the
+  lang to have a source text form for creating things like view definitions. The view definition
+  json is the intermediate form and it should look like a sql dialect that includes fhirpath and
+  allows for sof files. This should be clearly specified in this repo." So: `.sof` files hold
+  statements — `[CREATE VIEW name WITH (element = json, …) AS] [DECLARE c [type] = v, …] SELECT
+  items FROM Resource [WHERE p AND p]` — each compiling to ONE ViewDefinition. Three rules carry it:
+  keywords are in CAPITALS (FHIRPath's own words are lower case, so `value as Quantity AS q` has no
+  ambiguity and a path needs no parsing by us); between keywords stands FHIRPath as it is (a bare
+  path is its tokens' text, comments out, a line break one space; `"…"` holds one verbatim); text
+  and resource say the same both ways (the LAW: `(sof->views (view->sof v)) = (list v)`).
+  - `parser/lexer.rkt` (hand-written `tokenize`: a Tok keeps its offsets, line, column and the gap
+    before it, so a path is rebuilt from its tokens — `path-text`; a keyword after `.` or `%` is a
+    word), `parser/grammar.rkt` (brag, THE grammar: LANGUAGE.md prints its rules with the `/` cuts
+    removed, and the test holds the two equal — there is no second parser to keep in step; views
+    are small, brag's speed does not matter here), `compile.rkt` (`compile-sof`: tree -> JSON, each
+    statement with the loc of its first token; pure — no model loaded), `decompile.rkt`
+    (`view->sof`: one canonical layout; every choice decided by what compiles back — `bare-path?`
+    re-lexes), `sof.rkt` (`read-sof`: compiled AND held to `read-view` and the engine's static
+    refusals, problems at the statement; `source-text?`: a file's first character tells JSON `{`
+    and forms `(` from text).
+  - The order rule, which is what makes the mapping one to one (LANGUAGE.md 5.4): the items of a
+    SELECT are the table's columns in the order written; leading columns are the select's own
+    `column`, each `(SELECT …)` an entry of `select`, a run of columns AFTER a parenthesised item a
+    nested select of those columns alone, a `(… UNION ALL …)` group the `unionAll` and last. The
+    outermost SELECT is a pseudo-select whose parts are the view's `select` list. The decompiler
+    parenthesises a columns-only select exactly when it would otherwise merge with the run before.
+  - `#lang sql-on-fhir` (lang/reader.rkt) reads text, or — beginning with `(` — the generated
+    forms as before; a text module provides the same `resources`/`->nodes`/`->json`
+    (lang/text-module.rkt). `raco sql-on-fhir run x.sof`, `compile x.sof [-o dir]`, `decompile
+    v.json…`. workspace.rkt reads source text (an ad-hoc `query("view", "SELECT …")`, a `.sof`
+    file: every statement an artifact, `run` the first); fhir's `workspace-language-of` maps
+    `.sof`, fhir-mcp's `view-facts` reads a `.sof` file's name and type through `sof->views`.
+  - Held (`tests/language-test.rkt`): the document's grammar = grammar.rkt; its keywords and
+    constant types = the lexer's and compiler's = the IG's value[x] types; its 13 examples compile
+    to the JSON beside them; its error examples give their messages; its element table covers the
+    IG's ViewDefinition (through features.rkt's `view` rows). The law over the suite's 144 views
+    and the IG's 10 (148 unchanged, every valid one; 5 unwritable, 1 refused: all expectError
+    views), the document's examples, and 600 random views. A planted bug (OR NULL compiled as
+    forEach) fails four of its cases.
+  - Cannot say, refused by name (`exn:fail:unwritable`): id/extension/modifierExtension below the
+    top level, an empty list, a one-branch unionAll, a constant without exactly one value.
+  - No behaviour of the JSON route changed: 144/144, every earlier test as it was; tests 1,297 -> 1,582.
+  - Not done: a `.sof` file of several views is one table in a workspace (its first); a stored
+    ViewDefinition is not yet handed back as `.sof` by fhir-mcp's edit/export (`view->sof` is
+    there for it); the Provenance content type of a `.sof` source is still `application/json`.
 - **Start at `features.rkt`** (2026-11-24; `raco sql-on-fhir features [<table>] [--json]` prints it).
   The owner: "It should be easier to see from the code all of the available features operations and
   things I can do in sql on fhir." It was not: the list was prose in two header comments and

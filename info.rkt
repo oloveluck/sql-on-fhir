@@ -12,10 +12,10 @@
 (define pkg-desc "SQL on FHIR: ViewDefinitions run over FHIR data as tables, the model generated from the IG package, and the IG's $sql-run / $sql-export operations; the sql-on-fhir command-line tool and #lang sql-on-fhir")
 (define pkg-authors '(oloveluck))
 (define license 'MIT)
-(define deps '("base" "fhir" "fhirpath"))
+(define deps '("base" "fhir" "fhirpath" "brag-lib"))
 ;; fhir-spec: regenerating the model reads the R6 core package (the model delegates to the R6 tower)
 (define build-deps '("rackunit-lib" "fhir-spec" "scribble-lib" "racket-doc"))
 (define scribblings '(("scribblings/sql-on-fhir.scrbl" ())))
 (define raco-commands
-  '(("sql-on-fhir" (submod sql-on-fhir/cli main) "run ViewDefinitions over FHIR data; list what the package does; the shared test suite; regenerate the model from the IG package" #f)))
+  '(("sql-on-fhir" (submod sql-on-fhir/cli main) "run views (source text or ViewDefinitions) over FHIR data; compile and decompile them; list what the package does; the shared test suite; regenerate the model from the IG package" #f)))
 (define test-omit-paths '("tests/vendor" "spec" "scribblings"))

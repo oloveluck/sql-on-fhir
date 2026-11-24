@@ -5,6 +5,9 @@
 ;;; Where things are (features.rkt lists all of it, row by row, with the definition to read):
 ;;;
 ;;;   features.rkt     what the package does, as one table       raco sql-on-fhir features
+;;;   LANGUAGE.md      the source text: a SQL dialect with FHIRPath that compiles to ViewDefinitions
+;;;   parser/, compile.rkt, decompile.rkt, sof.rkt
+;;;                    its tokens and grammar; text -> ViewDefinition; back; checked
 ;;;   view.rkt         the engine: a view over resources -> rows
 ;;;   definition.rkt   a view held to the IG's definition of one
 ;;;   operations.rkt   $sql-run and $sql-export; the output formats; `view-rows`
@@ -21,7 +24,8 @@
 ;;;   (pin-registered-types!)
 ;;;   (define view-rows (dynamic-require 'sql-on-fhir 'view-rows))
 
-(require "features.rkt" "view.rkt" "definition.rkt" "operations.rkt" "unread.rkt")
+(require "features.rkt" "view.rkt" "definition.rkt" "operations.rkt" "unread.rkt"
+         "compile.rkt" "decompile.rkt" "sof.rkt")
 
 (provide
  ;; the IG's operations, and a view's rows
@@ -31,6 +35,9 @@
  ;; what the lenient read of the data left out of what a view read
  current-read-log make-read-log read-log? read-log-count read-log-reads
  view-chains unread-notes
+ ;; the source text (LANGUAGE.md): to ViewDefinitions, checked, and back
+ sof->views compile-sof (struct-out compiled) read-sof source-text?
+ view->sof views->sof (struct-out exn:fail:unwritable)
  ;; a view held to its definition
  read-view definition-url
  ;; the engine

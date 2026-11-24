@@ -1,12 +1,17 @@
 # SQL on FHIR ViewDefinitions
 
-A ViewDefinition flattens FHIR resources into a table: one row per resource (or per item of a
-repeating element), one column per FHIRPath. It is JSON, written in a `*.view.json` file (or as
-`#lang sql-on-fhir` forms). Use it for tables and counts across a population. This engine passes the
-shared SQL on FHIR test suite, 144 of 144.
+A view flattens FHIR resources into a table: one row per resource (or per item of a repeating
+element), one column per FHIRPath. Use it for tables and counts across a population.
 
-This guide is for writing views here: the format in brief, the ways to run one, and what to do when
-something goes wrong. The specification is the reference for the format itself.
+**Write a view as source text**, in a `.sof` file: SQL's clauses with FHIRPath between them
+(`SELECT … FROM Patient WHERE …`). It compiles to a *ViewDefinition*, the JSON resource the SQL on
+FHIR standard defines and other tools exchange; a `*.view.json` file holding that JSON is read just
+the same, and either form turns into the other without loss. This engine passes the shared SQL on
+FHIR test suite, 144 of 144.
+
+This guide is for writing views here: the language in brief, the ways to run one, and what to do
+when something goes wrong. `LANGUAGE.md` defines the source text (grammar, what each part compiles
+to); the specification is the reference for the ViewDefinition itself.
 
 ## Official references
 - SQL on FHIR: https://sql-on-fhir.org
@@ -14,6 +19,43 @@ something goes wrong. The specification is the reference for the format itself.
 - FHIRPath, the language of every path: http://hl7.org/fhirpath/N1/
 
 ## Cheat sheet
+```sof
+CREATE VIEW bp_readings
+  WITH (status = 'active')
+AS
+SELECT
+  getResourceKey() AS id,
+  subject.getReferenceKey(Patient) AS patient,
+  effective.ofType(dateTime) AS date,
+  (SELECT
+     code.coding.code.first() AS code,
+     value.ofType(Quantity).value AS value
+   FROM component)
+FROM Observation
+WHERE code.coding.exists(system = 'http://loinc.org' and code = '85354-9')
+```
+The rules of the text, all of them:
+- **Keywords are in capitals** (`SELECT FROM AS WHERE AND OR NULL REPEAT UNION ALL DECLARE CREATE
+  VIEW WITH TYPE COLLECTION NOT DESCRIPTION TAG`); between them stands FHIRPath, whose own words
+  are lower case. So `value as Quantity AS quantity` is a path and its column name.
+- **A column** is `path AS name`; a path that is one element's name needs no `AS` (`gender`). After
+  it: `COLLECTION` (every value, as a list), `TYPE dateTime`, `DESCRIPTION 'text'`.
+- **A row for each item**: a parenthesised `SELECT … FROM path` (the standard's `forEach`);
+  `FROM path OR NULL` keeps a resource that has none, with nulls (`forEachOrNull`);
+  `FROM REPEAT item, answer.item` follows the paths to any depth (`repeat`). Paths inside are
+  relative to the item.
+- **Alternatives stacked**: `(SELECT … FROM telecom UNION ALL SELECT … FROM contact.telecom)`,
+  the last item of its `SELECT`; the selects name the same columns in the same order.
+- **Which resources**: `WHERE cond AND cond` (each must be true; FHIRPath's lower-case `and` stays
+  inside one condition).
+- **A value named once**: `DECLARE loinc = 'http://loinc.org', top integer = 3` before `SELECT`;
+  paths read `%loinc`.
+- **The view itself**: `CREATE VIEW name WITH (status = 'active', title = '…') AS` before the
+  query; `WITH` takes any other element of a ViewDefinition, its value written as JSON. A bare
+  `SELECT … FROM Patient` is a view with no name.
+- Comments are `--`, `//` and `/* */`. Several views in a file are separated by `;`.
+
+That text compiles to this ViewDefinition (`sql-on-fhir compile` prints it; `decompile` goes back):
 ```view
 {
   "resourceType": "ViewDefinition",
@@ -42,6 +84,12 @@ names, so the two join. A column's path must give at most one value per row, unl
 `"collection": true`.
 
 ## Worked example
+```sof
+CREATE VIEW patients WITH (status = 'active') AS
+SELECT getResourceKey() AS id, gender, birthDate AS birth_date
+FROM Patient
+```
+which is this ViewDefinition:
 ```view
 {"resourceType": "ViewDefinition", "name": "patients", "status": "active", "resource": "Patient",
  "select": [{"column": [{"name": "id", "path": "getResourceKey()"},
@@ -58,9 +106,10 @@ p2,male,1990-03-01
 ## Running it
 **Command line.** `sql-on-fhir` (or `raco sql-on-fhir`):
 ```
-sql-on-fhir run patients.view.json data/ --format csv   # a directory of resources, a Bundle, or one resource
-sql-on-fhir run patients.view.json bundle.json          # NDJSON, the default; also json, fhir
-sql-on-fhir run readings.sof data/                      # a #lang sql-on-fhir module, whatever its extension
+sql-on-fhir run patients.sof data/ --format csv         # source text, over a directory of resources, a Bundle, or one resource
+sql-on-fhir run patients.view.json bundle.json          # a ViewDefinition as JSON; NDJSON, the default; also json, fhir
+sql-on-fhir compile patients.sof                        # the ViewDefinitions a file states, as FHIR JSON (-o dir/ writes <name>.view.json)
+sql-on-fhir decompile patients.view.json                # a ViewDefinition as source text
 sql-on-fhir run meds.view.json r4/ --fhir-version 4.0.1 # read the data as R4 (or 5.0.0); R6 is the default
 sql-on-fhir features                                    # everything it does, as a list; `features view`, `features sql-run` … for one table
 ```
@@ -77,22 +126,36 @@ more warnings come beside the table (stdout and the exit status are unchanged): 
 states no `status`, a view whose `fhirVersion` is not the version the data is read as, and data the
 view reads that the read left out (below).
 
-**As a module.** A file that starts with `#lang sql-on-fhir` writes the view in forms generated from
-the IG, so a misspelled element, a `status` outside its value set or a path that is not FHIRPath is
-a compile error, at its place in the file. It provides `resources` (the typed views) and `(->json)`.
+A `.sof` file may state several views; `run` takes the first. A problem in source text is said at
+its line and column, exit status 1: the text's syntax (`patients.sof:2:3: this column needs a name:
+write `name.family AS <name>``), a path that is not FHIRPath, a result that is no ViewDefinition.
+
+**As a module.** A file that starts with `#lang sql-on-fhir` is a Racket module of views: source
+text, or (beginning with a parenthesis) the forms generated from the IG. Either way a mistake is a
+compile error at its place in the file, and the module provides `resources` (the typed views) and
+`(->json)`; run as a program it prints its views as JSON.
 
 **As an operation.** `$sql-run` and `$sql-export` (`sql-on-fhir/operations`) are the IG's operations
 as procedures, over the current data source; `view-rows` gives the rows as hashes. `patient` and
 `group` keep the resources of those patients and of a Group's members (each must resolve), `_since`
 those changed after an instant. A Library subject, `source` and Parquet are answered `not-supported`.
 
-**In a workspace** (fhir-mcp). A `*.view.json` file is a ViewDefinition, its canonical
-`<workspace canonical>/ViewDefinition/<file stem>` unless it names one, checked as you write it.
+**In a workspace** (fhir-mcp). A `.sof` file (or a `*.view.json` file) is a view, its canonical
+`<workspace canonical>/ViewDefinition/<file stem>` unless it names one, checked as you write it;
+in SQL it is the table named by the file (keep one view to a file there).
 `run` answers its rows over the workspace's data in column order. `explain` of one resource
 (`Patient/p1`) shows the rows that resource alone produces, the rows it would produce without the
-`where`, and whether each `where` holds for it. `query("view", <json>)` runs a view without a file.
+`where`, and whether each `where` holds for it. `query("view", "SELECT id FROM Patient")` runs a
+view without a file (source text, or JSON).
 
 ## Common problems
+- ``unexpected word `select` (keywords are written in capitals: `SELECT`; in lower case `select` is
+  read as part of a path)``: write the language's keywords in capitals; lower case belongs to
+  FHIRPath.
+- ``this column needs a name: write `name.family AS <name>` ``: only a path that is a single
+  element's name may stand without `AS`.
+- ``a UNION ALL group comes last in its SELECT``: move the columns before it, or wrap the group as
+  `(SELECT (… UNION ALL …))`.
 - `unknown field …`: the view is strictly checked against the ViewDefinition model generated from the
   IG. Fix the element's name; the message gives the element and a link to its definition.
 - ``select[0].column[1].name "first-name" is not a name a database takes: letters, digits and _ only,

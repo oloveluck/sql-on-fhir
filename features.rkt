@@ -10,6 +10,7 @@
 ;;;   sql-run, sql-export  the two operations, by parameter        the IG's OperationDefinitions
 ;;;   refusals, warnings   what a view is held to; what is said beside its rows
 ;;;   ways-to-run          the command line, the forms a view and its data take
+;;;   the-source           the source text that compiles to a ViewDefinition (LANGUAGE.md)
 ;;;   from-racket          what `(require sql-on-fhir)` gives a program
 ;;;   in-a-workspace       what an agent's workspace (fhir-mcp) gets
 ;;;   not-done             what the specification has and this package does not
@@ -279,19 +280,25 @@
 ;; usages are these rows (`command-usages`).
 (define ways-to-run
   (rows 'run
-   '("raco sql-on-fhir run <view.json | view.rkt> [<data dir | bundle.json | resource.json>] [--format ndjson|json|csv|fhir] [--fhir-version 4.0.1|5.0.0|6.0.0]"
+   '("raco sql-on-fhir run <view.sof | view.json | view.rkt> [<data dir | bundle.json | resource.json>] [--format ndjson|json|csv|fhir] [--fhir-version 4.0.1|5.0.0|6.0.0]"
      own (cli.rkt cmd-run) ()
      "a view over data, the table on standard output; this is $sql-run")
+   '("a view as source text" own (sof.rkt read-sof) ()
+     "a .sof file: `SELECT … FROM Patient WHERE …`, the SQL dialect with FHIRPath of LANGUAGE.md, compiled to the ViewDefinition it states (the first, when it states several) and checked as one; the table `source` lists its parts")
    '("a view as FHIR JSON" yes (definition.rkt read-view) ()
-     "any JSON file holding a ViewDefinition, as the specification and its suite write one")
-   '("a view as `#lang sql-on-fhir`" own (lang/reader.rkt read-checked) ()
-     "a file of any extension that starts with that line: the view as Racket forms generated from the IG, so a misspelt element, a code outside its value set or a path that is not FHIRPath is a compile error at its place")
+     "any JSON file holding a ViewDefinition, as the specification and its suite write one: the form source text compiles to")
+   '("a view as `#lang sql-on-fhir`" own (lang/reader.rkt read-syntax-either) ()
+     "a file of any extension that starts with that line is a Racket module of views: source text, or (beginning with a parenthesis) the forms generated from the IG; either way a mistake is a compile error at its place")
    '("data: a directory, a Bundle, a resource" own (cli.rkt read-data) ()
      "a folder of JSON files one resource to a file, a file holding a Bundle, or a file holding one resource; none: the heading and no rows")
    '("--format ndjson|json|csv|fhir" own (cli.rkt cmd-run) ()
      "$sql-run's _format; ndjson unless said")
    '("--fhir-version 4.0.1|5.0.0|6.0.0" own (cli.rkt load-tower!) ()
      "the FHIR version the data is read as; 6.0.0 (the version the view model is built over) unless said")
+   '("raco sql-on-fhir compile <file.sof> [-o <dir>]" own (cli.rkt cmd-compile) ()
+     "source text to the ViewDefinitions it states, as FHIR JSON: printed, or each written to <dir>/<name>.view.json")
+   '("raco sql-on-fhir decompile <view.json>…" own (cli.rkt cmd-decompile) ()
+     "ViewDefinitions as the source text that states them")
    '("raco sql-on-fhir features [<table>] [--json]" own (cli.rkt cmd-features) ()
      "this table, or one of its tables by name; as JSON")
    '("raco sql-on-fhir tck [-v]" own (cli.rkt cmd-tck) ()
@@ -302,6 +309,42 @@
      "verify model/ is what spec/ generates")
    '("raco sql-on-fhir fetch [--version 3.0.0-ballot] [--tests-commit <sha>]" own (cli.rkt cmd-fetch) ()
      "download the IG package and the shared test suite again (needs the network)")))
+
+;; ---- the source text ------------------------------------------------------------------------------
+;; LANGUAGE.md is the definition of the language; these rows are its parts, each with the function
+;; that compiles it. (The keywords named here are the lexer's: tests/language-test.rkt.)
+(define the-source
+  (rows 'source
+   '("SELECT <items> FROM <Resource>" own (compile.rkt view-of) ()
+     "a statement: one view, compiled to one ViewDefinition; the items in the order written are the table's columns in that order")
+   '("<path> AS <name>" own (compile.rkt column-of) ()
+     "a column; a path that is one element's name needs no AS and is named by it")
+   '("TYPE, COLLECTION, NOT COLLECTION, DESCRIPTION, TAG" own (compile.rkt column-of) ()
+     "after a column: its type, that it holds every value as a list, its description, its tags")
+   '("(SELECT <items> FROM <path>)" own (compile.rkt select-of) ()
+     "a nested select, a row for each item of the path (forEach); without FROM, over the same item")
+   '("FROM <path> OR NULL" own (compile.rkt select-of) ()
+     "a row for each item, and one row of nulls when there is none (forEachOrNull)")
+   '("FROM REPEAT <path>, <path>" own (compile.rkt select-of) ()
+     "a row for each item reached by following the paths to any depth (repeat)")
+   '("(SELECT … UNION ALL SELECT …)" own (compile.rkt items-of) ()
+     "the rows of each select, one after another (unionAll); the last item of its SELECT")
+   '("WHERE <path> AND <path>" own (compile.rkt condition-of) ()
+     "the resources kept: each condition one `where`, with its DESCRIPTION when it has one")
+   '("DECLARE <name> [<type>] = <value>" own (compile.rkt constant-of) ()
+     "a constant, read by paths as %name; without a type the value says it")
+   '("CREATE VIEW <name> WITH (<element> = <value>) AS" own (compile.rkt options-of) ()
+     "the view's name, and every other element of the view by its own name, its value written as JSON")
+   '("a path" own (compile.rkt path-of) ()
+     "FHIRPath as it is, from its first token to the keyword, comma or parenthesis that ends it; in double quotes, exactly the text between them")
+   '("keywords in capitals" own (parser/lexer.rkt tokenize) ()
+     "what tells the language's words from FHIRPath's lower-case ones (`value as Quantity AS quantity`); comments are --, // and /* */")
+   '("several statements" own (compile.rkt compile-sof) ()
+     "a file states any number of views, separated by `;`")
+   '("a ViewDefinition back to text" own (decompile.rkt view->sof) ()
+     "the statement that compiles to exactly that ViewDefinition; what the language has no place for is refused, by name")
+   '("checked as it is read" own (sof.rkt read-sof) ()
+     "every problem at its line and column: the text's syntax, a path that is not FHIRPath, a result that is no ViewDefinition")))
 
 ;; ---- from Racket ----------------------------------------------------------------------------------
 ;; The names are what `(require sql-on-fhir)` provides (main.rkt), one row to a module's part of it.
@@ -323,6 +366,12 @@
      "the engine: a typed view over typed resources, its rows and its column names in order")
    '(("exn:fail:view" "path-syntax-problem" "rewrite-sof") own (view.rkt compile-path) ()
      "a view refused before any data is read; what is wrong with a path's syntax; the IG's functions rewritten as plain FHIRPath")
+   '(("sof->views" "compile-sof" "compiled") own (compile.rkt compile-sof) ()
+     "source text (LANGUAGE.md) to the ViewDefinitions it states, as JSON; with where each statement begins")
+   '(("read-sof" "source-text?") own (sof.rkt read-sof) ()
+     "the same, each result held to what a ViewDefinition is; whether a file's text is source text")
+   '(("view->sof" "views->sof" "exn:fail:unwritable") own (decompile.rkt view->sof) ()
+     "a ViewDefinition as the source text that states it; the refusal when the language has no place for something in it")
    '(("view-chains" "unread-notes") own (unread.rkt unread-notes) ()
      "the elements a view's paths walk; a sentence for each that the read left out")
    '(("features" "features-of" "tables" "table" "states" "feature" "command-usages" "features->text" "features->jsexpr")
@@ -367,6 +416,7 @@
         (table 'refusals "What refuses a view" "each an error with its reason: an OperationOutcome from an operation, exit status 1 from the command")
         (table 'warnings "What is said beside the rows" "the table is printed all the same; the command writes these on standard error")
         (table 'run "From the command line" "")
+        (table 'source "The source text (.sof)" "the SQL dialect with FHIRPath that compiles to ViewDefinitions: LANGUAGE.md defines it")
         (table 'racket "From Racket" "(require sql-on-fhir)")
         (table 'workspace "In a workspace" "fhir-mcp: a directory of files an agent works in")
         (table 'not-done "Not done" "what the specification has and this package does not")))
@@ -374,7 +424,7 @@
 ;; features : (Listof Feature)   every row, table by table
 (define features
   (append the-view in-a-path sql-run sql-run-answers sql-export sql-export-answers
-          refusals warnings ways-to-run from-racket in-a-workspace not-done))
+          refusals warnings ways-to-run the-source from-racket in-a-workspace not-done))
 
 ;; features-of : area -> (Listof Feature)
 (define (features-of area) (filter (lambda (f) (eq? (feature-area f) area)) features))
@@ -436,7 +486,7 @@
     (check-true (pair? names) (format "~a" (table-area t)))
     (check-false (check-duplicates names) (format "~a" (table-area t))))
   ;; the commands, from their rows
-  (check-equal? (map car (command-usages)) '("run" "features" "tck" "regen" "check" "fetch"))
+  (check-equal? (map car (command-usages)) '("run" "compile" "decompile" "features" "tck" "regen" "check" "fetch"))
   (check-regexp-match #rx"^raco sql-on-fhir run <view" (cadr (assoc "run" (command-usages))))
   ;; printed: a heading per table, a row's three lines; one table alone
   (define text (features->text features))

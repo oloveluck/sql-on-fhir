@@ -1,7 +1,8 @@
 #lang racket/base
 
-;;; workspace.rkt — what SQL on FHIR offers a workspace (fhir/lang/workspace): a ViewDefinition written
-;;; as JSON (`*.view.json`, the form the specification and its test suite use) is an artifact
+;;; workspace.rkt — what SQL on FHIR offers a workspace (fhir/lang/workspace): a view written as
+;;; source text (LANGUAGE.md: `SELECT … FROM Patient`; the text given to an ad-hoc query, or a file's)
+;;; or as JSON (`*.view.json`, the form the specification and its test suite use) is an artifact
 ;;; (canonical `<workspace canonical>/ViewDefinition/<file stem>` unless it names one), checked
 ;;; against the model generated from the IG; a run is its rows over the data source; an explanation,
 ;;; what one resource contributes: the rows it alone produces, and whether each `where` holds for it.
@@ -14,6 +15,8 @@
          (only-in fhir/data-source current-data-source data-source-all data-source-read)
          (only-in "view.rkt" view-columns rewrite-sof exn:fail:view? exn:fail:view-path)
          (only-in "definition.rkt" read-view)
+         (only-in "sof.rkt" read-sof source-text?)
+         (only-in "compile.rkt" compiled-view compiled-loc)
          (only-in "operations.rkt" view-rows current-read-log make-read-log read-log-count read-log-reads)
          (only-in "unread.rkt" unread-notes)
          (only-in fhirpath/parser/parse parse-fhirpath)
@@ -47,8 +50,28 @@
 (define (fail path msg [at (loc (and path (path-string path)) #f #f #f #f)])
   (raise (exn:fail:diagnostic msg (current-continuation-marks) (diagnostic 'sql-on-fhir 'compile 'error msg at))))
 
-;; view : workspace path|#f text -> ViewDefinition jsexpr   raises a diagnostic when it is not one
+;; views : workspace path|#f text -> (listof (cons ViewDefinition-jsexpr loc|#f))   every view a text
+;; states, with where its statement begins: source text (LANGUAGE.md) any number, each checked as it
+;; is compiled, its problems at their lines and columns; JSON one, with no place
+(define (views ws path text)
+  (cond [(source-text? text)
+         (for/list ([c (in-list (read-sof text (and path (path-string path))))])
+           (define v (compiled-view c))
+           (cons (if (and path (not (hash-has-key? v 'url)) (hash-ref v 'name #f))
+                     (hash-set v 'url (string-append (regexp-replace #rx"[^/]*$" (file-canonical ws "ViewDefinition" path) "") (hash-ref v 'name)))
+                     v)
+                 (compiled-loc c)))]
+        [else (list (cons (json-view ws path text) #f))]))
+
+;; view : workspace path|#f text -> ViewDefinition jsexpr   raises a diagnostic when it is not one;
+;; of source text, the first view it states
 (define (view ws path text)
+  (if (source-text? text)
+      (let ([all (views ws path text)])
+        (when (null? all) (fail path "the text states no view: SELECT <columns> FROM <Resource>"))
+        (car (car all)))
+      (json-view ws path text)))
+(define (json-view ws path text)
   (define js (with-handlers ([exn:fail? (lambda (e) (fail path (format "not JSON: ~a" (exn-message e))))]) (string->jsexpr text)))
   (unless (and (hash? js) (member (hash-ref js 'resourceType "ViewDefinition") '("ViewDefinition")))
     (fail path "a ViewDefinition is a JSON object with \"resourceType\": \"ViewDefinition\""))
@@ -71,12 +94,19 @@
 (define (artifacts ws files)
   (for/fold ([rs '()] [ds '()] #:result (values (reverse rs) ds)) ([f (in-list files)])
     (with-handlers ([exn:fail:diagnostic? (lambda (e) (values rs (append ds (list (exn:fail:diagnostic-diagnostic e)))))])
-      (define v (view ws (car f) (cdr f)))
-      (values (cons (if (hash-has-key? v 'id) v (hash-set v 'id (regexp-replace* #rx"[^A-Za-z0-9.-]" (file-stem (car f)) "-"))) rs)
-              (append ds
-                      (filter values (list (status-problem (car f) (cdr f) v)
-                                           (version-problem (car f) (cdr f) v (version-name ws))))
-                      (path-problems (car f) (cdr f) v))))))
+      (define all (views ws (car f) (cdr f)))
+      (define stem (regexp-replace* #rx"[^A-Za-z0-9.-]" (file-stem (car f)) "-"))
+      (for/fold ([rs rs] [ds ds]) ([v+at (in-list all)] [i (in-naturals 1)])
+        (define v (car v+at))
+        ;; a view without an id is named by its file; of several in one file, by its own name
+        (define id (cond [(= (length all) 1) stem]
+                         [else (regexp-replace* #rx"[^A-Za-z0-9.-]" (or (hash-ref v 'name #f) (format "~a-~a" stem i)) "-")]))
+        (values (cons (if (hash-has-key? v 'id) v (hash-set v 'id id)) rs)
+                (append ds
+                        (filter values (list (let ([d (status-problem (car f) (cdr f) v)])
+                                               (if (and d (cdr v+at)) (struct-copy diagnostic d [loc (cdr v+at)]) d))
+                                             (version-problem (car f) (cdr f) v (version-name ws))))
+                        (path-problems (car f) (cdr f) v)))))))
 
 ;; status-problem : path text ViewDefinition -> diagnostic | #f
 ;; The definition requires `status` (1..1) and a view without one still runs — the shared suite's own
@@ -86,7 +116,7 @@
   (and (not (hash-has-key? v 'status))
        (diagnostic 'sql-on-fhir 'compile 'warning
                    (format "no `status` (the standard requires it: ~a)" status-values)
-                   (text-location file text (regexp-match-positions #rx"{" text)))))
+                   (text-location file text (regexp-match-positions (if (source-text? text) #px"CREATE|DECLARE|SELECT" #rx"{") text)))))
 
 ;; version-problem : path text ViewDefinition version-name -> diagnostic | #f
 ;; A view may name the FHIR versions of the resources it is for (`fhirVersion`: "4.0", "5.0.0"). When
@@ -147,10 +177,12 @@
                           (check (hash-ref w 'path) '())))))
       '()))
 
-;; string-location : file text string -> loc   where the JSON string "<s>" first appears (the file
-;; itself when it does not)
+;; string-location : file text string -> loc   where the JSON string "<s>" first appears, else the
+;; string as it is (the file itself when neither does)
 (define (string-location file text s)
-  (text-location file text (regexp-match-positions (regexp-quote (jsexpr->string s)) text)))
+  (text-location file text (or (regexp-match-positions (regexp-quote (jsexpr->string s)) text)
+                               ;; in source text (LANGUAGE.md) a path stands as it is
+                               (regexp-match-positions (regexp-quote s) text))))
 ;; text-location : file text match-positions|#f -> loc   the match's line and column in the text
 (define (text-location file text m)
   (cond
@@ -229,6 +261,21 @@
     (check-equal? (hash-ref e 'rows) '())
     (check-equal? (hash-ref e 'rowsWithoutWhere) 1)
     (check-equal? (hash-ref (car (hash-ref e 'where)) 'holds) #f))
+  ;; source text is read as JSON is: its rows, its problems at their places, a view to a statement
+  (define source "-- active patients\nCREATE VIEW active_patients WITH (status = 'active') AS\nSELECT getResourceKey() AS id, name.family.first() AS family\nFROM Patient\nWHERE active = true")
+  (parameterize ([current-data-source (resources->data-source data)])
+    (define r (run ws #f source (hasheq)))
+    (check-equal? (run-result-columns r) '("id" "family"))
+    (check-equal? (run-result-rows r) (list (hasheq 'id "a" 'family "Ng"))))
+  (let-values ([(rs ds) (artifacts ws (list (cons "/tmp/two.sof" (string-append source ";\n\nSELECT id,\n  nmae.family AS family FROM Patient"))))])
+    (check-equal? (map (lambda (v) (hash-ref v 'id)) rs) '("active-patients" "two-2"))
+    (check-equal? (hash-ref (car rs) 'url) "http://example.org/workspace/ViewDefinition/active_patients")
+    (check-equal? (map (lambda (d) (list (diagnostic-severity d) (loc-line (diagnostic-loc d)) (loc-column (diagnostic-loc d)) (diagnostic-message d))) ds)
+                  '((warning 7 1 "no `status` (the standard requires it: \"draft\", \"active\", \"retired\" or \"unknown\")")
+                    (error 8 3 "no element Patient.nmae (did you mean `name`?)"))))
+  (let-values ([(rs ds) (artifacts ws (list (cons "/tmp/bad.sof" "SELECT id,\n  name.family\nFROM Patient")))])
+    (check-equal? (map (lambda (d) (list (loc-line (diagnostic-loc d)) (loc-column (diagnostic-loc d)) (diagnostic-message d))) ds)
+                  '((2 3 "this column needs a name: write `name.family AS <name>`"))))
   ;; a path to an element the type does not have is an error at its string in the file (inside a
   ;; forEach, against the element it iterates); functions and getReferenceKey(T) are not
   (define typos (string-append

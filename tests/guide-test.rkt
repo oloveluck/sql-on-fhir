@@ -9,7 +9,11 @@
          fhir/operation
          (only-in sql-on-fhir/workspace guide with-unread status-problem version-problem)
          (only-in fhir/diagnostic diagnostic-message diagnostic-loc loc-line loc-column)
-         (only-in sql-on-fhir/operations view-rows $sql-run))
+         (only-in sql-on-fhir/operations view-rows $sql-run)
+         (only-in sql-on-fhir/sof read-sof)
+         (only-in sql-on-fhir/compile compiled-view)
+         (only-in sql-on-fhir/parser/lexer keywords)
+         (only-in fhir/diagnostic exn:fail:diagnostic? exn:fail:diagnostic-diagnostic))
 
 (define-runtime-path guide-file "../guide.md")
 (define text (file->string guide-file))
@@ -32,6 +36,27 @@
 
 (test-case "the guide the workspace serves is this file"
   (check-equal? guide text))
+
+(test-case "every view the guide writes as source text is the ViewDefinition it shows"
+  (define sources (regexp-match* #px"```sof\n(.*?)```" text #:match-select cadr))
+  (check-true (>= (length sources) 2))
+  (for ([source (in-list sources)])
+    (define compiled (map compiled-view (read-sof source)))
+    (check-equal? (length compiled) 1)
+    (check-equal? (car compiled) (view-named (hash-ref (car compiled) 'name)) source)))
+
+(test-case "the keywords the guide lists are the language's"
+  (define listed (cadr (regexp-match #px"Keywords are in capitals[*]* [(]`([A-Z \n]+)`[)]" text)))
+  (check-equal? (sort (string-split listed) string<?) (sort keywords string<?)))
+
+(test-case "the common problems of source text are said as the guide says them"
+  (define (said text)
+    (with-handlers ([exn:fail:diagnostic? (lambda (e) (diagnostic-message (exn:fail:diagnostic-diagnostic e)))]) (read-sof text) #f))
+  (for ([case (in-list (list (cons "select id from Patient" "unexpected word `select` (keywords are written in capitals: `SELECT`; in lower case `select` is read as part of a path)")
+                             (cons "SELECT name.family FROM Patient" "this column needs a name: write `name.family AS <name>`")))])
+    (check-equal? (said (car case)) (cdr case))
+    (check-true (string-contains? (string-normalize-spaces text) (cdr case)) (cdr case)))
+  (check-regexp-match #rx"^a UNION ALL group comes last in its SELECT" (said "SELECT (SELECT a UNION ALL SELECT a), id FROM Patient")))
 
 (test-case "every view in the guide is a ViewDefinition"
   (check-true (>= (length views) 2))

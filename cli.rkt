@@ -4,12 +4,18 @@
 ;;;
 ;;;   raco sql-on-fhir run <view.json | view.rkt> [<data>] [--format ndjson|json|csv|fhir] [--fhir-version 4.0.1|5.0.0|6.0.0]
 ;;;       run a ViewDefinition ($sql-run) over FHIR data: a directory of JSON files, a Bundle or a
-;;;       resource; the view as JSON or a #lang sql-on-fhir module. The data is read as FHIR R6 (the
+;;;       resource; the view as source text (a .sof file: the first view it states), as JSON, or as
+;;;       a #lang sql-on-fhir module. The data is read as FHIR R6 (the
 ;;;       version the view model is built over) unless --fhir-version names another; a path to an
 ;;;       element the resource type lacks in that version is a warning on stderr; so are a view that
 ;;;       states no `status`, and data the view reads that the read left out (an element that
 ;;;       version does not have, a value that is not valid FHIR), and a view that names the FHIR
 ;;;       versions it is for (`fhirVersion`) when the data is read as another.
+;;;   raco sql-on-fhir compile <file.sof> [-o <dir>]
+;;;       source text (LANGUAGE.md) to the ViewDefinitions it states, as FHIR JSON: on standard
+;;;       output, or each in a file of <dir> named by the view
+;;;   raco sql-on-fhir decompile <view.json>…
+;;;       ViewDefinitions as the source text that states them
 ;;;   raco sql-on-fhir features [<table>] [--json]
 ;;;       everything the package does, as a list (features.rkt): a ViewDefinition's elements, what a
 ;;;       path may call, the two operations' parameters, what refuses a view, the commands, the
@@ -24,7 +30,9 @@
          (only-in "features.rkt" command-usages features features-of tables table-area features->text features->jsexpr)
          (only-in fhir/serialize/to-json node->jsexpr)
          (only-in fhir/model/registry pin-registered-types!)
-         (only-in fhir/diagnostic diagnostic-message diagnostic-loc loc-line loc-column))
+         (only-in fhir/diagnostic diagnostic-message diagnostic-loc loc-line loc-column
+                  exn:fail:diagnostic? exn:fail:diagnostic-diagnostic)
+         (only-in fhir/serialize/fhir-json fhir-json->string))
 
 ;; here : -> path   the package's source directory, where `fetch` writes the IG package and the test
 ;; suite. A development command's destination, not a file the tools read at run time, so it is not a
@@ -54,6 +62,9 @@
 ;; version. The module-path indexes are what lets a standalone build carry these modules.
 (define-runtime-module-path-index operations-module 'sql-on-fhir/operations)
 (define-runtime-module-path-index workspace-module 'sql-on-fhir/workspace)
+(define-runtime-module-path-index sof-module 'sql-on-fhir/sof)
+(define-runtime-module-path-index compile-module 'sql-on-fhir/compile)
+(define-runtime-module-path-index decompile-module 'sql-on-fhir/decompile)
 (define-runtime-module-path-index r4-tower 'fhir/r4/schemas)
 (define-runtime-module-path-index r5-tower 'fhir/r5/schemas)
 ;; fhir-versions : (listof (list --fhir-version-value name tower|#f))   #f: R6, the view model's own
@@ -71,9 +82,11 @@
   (eprintf "sql-on-fhir: ~a\n" (apply format fmt args))
   (exit 1))
 
-;; read-view : path -> ViewDefinition jsexpr   a `#lang sql-on-fhir` module (whatever its extension:
-;; `.rkt`, `.sof`) by its first view, else the file as JSON; a module that does not compile or run
-;; and unreadable JSON are each the error's own message, exit 1
+;; read-view : path -> (values ViewDefinition-jsexpr loc|#f)   the view a file holds, and, for source
+;; text, where its statement begins: a `#lang sql-on-fhir` module (whatever its extension: `.rkt`,
+;; `.sof`) by its first view; source text (LANGUAGE.md) by its first statement; else the file as
+;; JSON. A module that does not compile or run, text that does not compile and unreadable JSON are
+;; each the error's own message, exit 1.
 (define (read-view f)
   (cond
     [(module-file? f)
@@ -82,10 +95,19 @@
                                    (lambda () (fail "~a is not a #lang sql-on-fhir module (it provides no views)" f)))))
      (define views (if (list? rs) rs (list rs)))
      (when (null? views) (fail "~a defines no ViewDefinition" f))
-     (node->jsexpr (car views))]
+     (values (node->jsexpr (car views)) #f)]
+    [((dynamic-require sof-module 'source-text?) (file->string f))
+     (define views (source-views f))
+     (when (null? views) (fail "~a states no view" f))
+     (values ((dynamic-require compile-module 'compiled-view) (car views))
+             ((dynamic-require compile-module 'compiled-loc) (car views)))]
     [else
-     (with-handlers ([exn:fail:read? (lambda (e) (fail "~a is not JSON: ~a" f (exn-message e)))])
-       (call-with-input-file f read-json))]))
+     (values (with-handlers ([exn:fail:read? (lambda (e) (fail "~a is not JSON: ~a" f (exn-message e)))])
+               (call-with-input-file f read-json))
+             #f)]))
+;; source-views : path -> (listof Compiled)   a file of source text as its views, each held to what a
+;; ViewDefinition is (sof.rkt); a problem is `file:line:col: message`, exit 1
+(define (source-views f) (source-views* f (file->string f)))
 ;; module-file? : path -> boolean   a `.rkt` file, or one that starts with a #lang line
 (define (module-file? f)
   (or (regexp-match? #rx"[.]rkt$" f)
@@ -96,13 +118,14 @@
 ;; user's. Racket's `context...` lines are never part of the message.
 (define (module-error-text f e)
   (define locs (if (exn:srclocs? e) ((exn:srclocs-accessor e) e) '()))
+  (define here (simplify-path (path->complete-path f)))
   (define in-file?
     (for/or ([l (in-list locs)])
       (let ([src (srcloc-source l)])
-        (and (path? src) (equal? (simplify-path src) (simplify-path (path->complete-path f)))))))
-  (define positioned (and (pair? locs) (regexp-match #px"^[^\n]*?:[0-9]+:[0-9]+: (.*)$" (exn-message e))))
-  (cond [(and positioned in-file?) (exn-message e)]
-        [positioned (format "~a: ~a" f (cadr positioned))]
+        (and (or (path? src) (string? src)) (equal? (simplify-path (path->complete-path src)) here)))))
+  (define positioned (and (pair? locs) (regexp-match #px"^[^\n]*?:([0-9]+):([0-9]+): (.*)$" (exn-message e))))
+  (cond [(and positioned in-file?) (format "~a:~a:~a: ~a" f (cadr positioned) (caddr positioned) (cadddr positioned))]
+        [positioned (format "~a: ~a" f (cadddr positioned))]
         [else (format "~a: ~a" f (exn-message e))]))
 
 (define (read-data f)
@@ -129,11 +152,15 @@
     (located f d (format " (the data is read as FHIR ~a~a)" version-name
                          (if (equal? version-name "R6") "; --fhir-version 4.0.1 reads it as R4" "")))))
 
-;; status-warnings : path text ViewDefinition -> (listof Warning)   a JSON view that states no
-;; `status`: the standard requires one, and the view runs all the same (the shared suite's own views do)
-(define (status-warnings f text view)
+;; status-warnings : path text ViewDefinition loc|#f -> (listof Warning)   a view that states no
+;; `status`: the standard requires one, and the view runs all the same (the shared suite's own views
+;; do). For source text it is said where the statement begins, with how to write it.
+(define (status-warnings f text view at)
   (define d ((dynamic-require workspace-module 'status-problem) f text view))
-  (if d (list (located f d)) '()))
+  (cond [(not d) '()]
+        [at (list (cons (diagnostic-message d)
+                        (format "~a:~a:~a: ~a: CREATE VIEW <name> WITH (status = 'active') AS …" f (loc-line at) (loc-column at) (diagnostic-message d))))]
+        [else (list (located f d))]))
 
 ;; version-warnings : path text ViewDefinition version-name -> (listof Warning)   a view that names
 ;; the FHIR versions it is for (`fhirVersion`), read as another; with the option that reads the data
@@ -167,11 +194,11 @@
                      (format "--fhir-version takes 4.0.1, 5.0.0 or 6.0.0 (got ~a)" (opt args "--fhir-version" #f)))))
   (load-tower! (caddr version))
   (define $sql-run (dynamic-require operations-module '$sql-run))
-  (define view (read-view (car ps)))
+  (define-values (view statement) (read-view (car ps)))
   (define text (file->string (car ps)))
   (define with-unread (dynamic-require workspace-module 'with-unread))
   (define paths (path-warnings (car ps) text view (cadr version)))
-  (define warnings (append (if (module-file? (car ps)) '() (status-warnings (car ps) text view))
+  (define warnings (append (if (module-file? (car ps)) '() (status-warnings (car ps) text view statement))
                            (version-warnings (car ps) text view (cadr version))
                            paths))
   (define (warn! ws) (for ([w (in-list ws)]) (eprintf "sql-on-fhir: warning: ~a\n" (cdr w))))
@@ -192,6 +219,62 @@
   (if (equal? (hash-ref result 'resourceType) "Binary")
       (void (write-bytes (base64-decode (string->bytes/utf-8 (hash-ref result 'data)))))
       (displayln (jsexpr->string result))))
+
+;; ---- compile, decompile -------------------------------------------------------------------------
+;; cmd-compile : args -> void   a file of source text as the ViewDefinitions it states: FHIR JSON on
+;; standard output, one view after another; with -o <dir>, each written to <dir>/<name>.view.json
+;; (the view's name, else the file's with the statement's number)
+(define (cmd-compile args)
+  (define ps (positional (let ([m (member "-o" args)]) (if (and m (pair? (cdr m))) (append (takef args (lambda (a) (not (equal? a "-o")))) (cddr m)) args))))
+  (when (null? ps) (usage-error "sql-on-fhir" usages "compile"))
+  (require-files! "sql-on-fhir" usages "compile" ps)
+  (define out (opt args "-o" #f))
+  (define compiled-view (dynamic-require compile-module 'compiled-view))
+  (for ([f (in-list ps)])
+    (define views
+      (if (module-file? f)
+          (map node->jsexpr
+               (with-handlers ([exn:fail? (lambda (e) (fail "~a" (module-error-text f e)))])
+                 (dynamic-require (path->complete-path f) 'resources
+                                  (lambda () (fail "~a is not a #lang sql-on-fhir module (it provides no views)" f)))))
+          (map compiled-view (source-views f))))
+    (define stem (regexp-replace #rx"[.][^.]*$" (let-values ([(_d name _?) (split-path f)]) (path->string name)) ""))
+    (for ([v (in-list views)] [i (in-naturals 1)])
+      (define json (fhir-json->string v #:indent 2))
+      (cond [out
+             (make-directory* out)
+             (define name (format "~a.view.json" (or (hash-ref v 'name #f) (if (= (length views) 1) stem (format "~a-~a" stem i)))))
+             (call-with-output-file (build-path out name) #:exists 'truncate (lambda (o) (write-string json o) (newline o)))
+             (printf "~a\n" (path->string (build-path out name)))]
+            [else (displayln json)]))))
+;; source-views* : path text -> (listof Compiled)
+(define (source-views* f text)
+  (with-handlers ([exn:fail:diagnostic?
+                   (lambda (e)
+                     (define d (exn:fail:diagnostic-diagnostic e))
+                     (define l (diagnostic-loc d))
+                     (fail "~a~a: ~a" f (if (and l (loc-line l)) (format ":~a:~a" (loc-line l) (loc-column l)) "") (diagnostic-message d)))])
+    ((dynamic-require sof-module 'read-sof) text f)))
+
+;; cmd-decompile : args -> void   ViewDefinitions (JSON files) as the source text that states them;
+;; several are one text, each statement ended by `;`
+(define (cmd-decompile args)
+  (define ps (positional args))
+  (when (null? ps) (usage-error "sql-on-fhir" usages "decompile"))
+  (require-files! "sql-on-fhir" usages "decompile" ps)
+  (define unwritable? (dynamic-require decompile-module 'exn:fail:unwritable?))
+  (define views
+    (for/list ([f (in-list ps)])
+      (define v (with-handlers ([exn:fail:read? (lambda (e) (fail "~a is not JSON: ~a" f (exn-message e)))])
+                  (call-with-input-file f read-json)))
+      (unless (hash? v) (fail "~a holds no ViewDefinition" f))
+      (cons f v)))
+  (define (text-of f v)
+    (with-handlers ([unwritable? (lambda (e) (fail "~a ~a" f (exn-message e)))])
+      ((dynamic-require decompile-module 'view->sof) v)))
+  (if (= (length views) 1)
+      (displayln (text-of (caar views) (cdar views)))
+      (for ([fv (in-list views)]) (printf "~a;\n\n" (text-of (car fv) (cdr fv))))))
 
 ;; ---- features -----------------------------------------------------------------------------------
 ;; cmd-features : args -> void   the feature list (features.rkt), or one of its tables by name; as
@@ -247,7 +330,7 @@
 
 ;; handlers : (hash command -> (args -> any))   one to a command of `usages`
 (define handlers
-  (hash "run" cmd-run "features" cmd-features "tck" cmd-tck
+  (hash "run" cmd-run "compile" cmd-compile "decompile" cmd-decompile "features" cmd-features "tck" cmd-tck
         "regen" cmd-regen "check" cmd-check "fetch" cmd-fetch))
 
 (module+ test

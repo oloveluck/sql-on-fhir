@@ -6,17 +6,19 @@
 ;;; the rows on stdout, the problems on stderr — each the message alone, never Racket's `context...`
 ;;; lines or an internal contract violation — and the exit status.
 
-(require rackunit racket/file racket/string racket/system compiler/find-exe)
+(require rackunit racket/file racket/string racket/system compiler/find-exe json)
 
 (define dir (make-temporary-file "sql-on-fhir-cli-~a" 'directory))
 ;; write! : name line … -> name   a file of the temporary directory
 (define (write! name . lines) (display-lines-to-file lines (build-path dir name)) name)
 ;; run : argument … -> (list exit-status stdout stderr)   `raco sql-on-fhir run <arguments>` there
-(define (run . args)
+(define (run . args) (apply command "run" args))
+;; command : subcommand argument … -> (list exit-status stdout stderr)   `raco sql-on-fhir <subcommand> …`
+(define (command . args)
   (define out (open-output-string))
   (define err (open-output-string))
   (define code (parameterize ([current-directory dir] [current-output-port out] [current-error-port err])
-                 (apply system*/exit-code (find-exe) "-l-" "raco" "sql-on-fhir" "run" args)))
+                 (apply system*/exit-code (find-exe) "-l-" "raco" "sql-on-fhir" args)))
   (list code (get-output-string out) (get-output-string err)))
 
 (make-directory (build-path dir "patients"))
@@ -180,5 +182,92 @@
   ;; a module that is no view at all
   (write! "other.rkt" "#lang racket/base")
   (check-equal? (run "other.rkt") (list 1 "" "sql-on-fhir: other.rkt is not a #lang sql-on-fhir module (it provides no views)\n")))
+
+
+;; ---- source text (LANGUAGE.md) ----------------------------------------------------------------------
+(make-directory (build-path dir "data"))
+(void (write! "data/ann.json" "{\"resourceType\": \"Patient\", \"id\": \"ann\", \"gender\": \"female\", \"birthDate\": \"1974-12-25\","
+              " \"name\": [{\"family\": \"Lee\", \"given\": [\"Ann\", \"Marie\"]}],"
+              " \"telecom\": [{\"system\": \"phone\", \"value\": \"555-0100\"}, {\"system\": \"email\", \"value\": \"ann@example.org\"}]}"))
+(void (write! "data/bob.json" "{\"resourceType\": \"Patient\", \"id\": \"bob\", \"gender\": \"male\", \"birthDate\": \"1990-03-01\","
+              " \"name\": [{\"family\": \"Ortiz\", \"given\": [\"Bob\"]}]}"))
+(define patients-sof
+  '("-- patients.sof: one row to a patient"
+    "CREATE VIEW patients WITH (status = 'active') AS"
+    "SELECT"
+    "  getResourceKey() AS id,"
+    "  name.family.first() AS family,"
+    "  gender,"
+    "  birthDate AS birth_date"
+    "FROM Patient"))
+
+(test-case "a view written as source text runs as its ViewDefinition does (the README's and the manual's example)"
+  (apply write! "patients.sof" patients-sof)
+  (check-equal? (run "patients.sof" "data/" "--format" "csv")
+                (list 0 "id,family,gender,birth_date\r\nann,Lee,female,1974-12-25\r\nbob,Ortiz,male,1990-03-01\r\n" ""))
+  ;; a row for each item, or one of nulls: a nested SELECT … FROM path OR NULL
+  (write! "contacts.sof" "CREATE VIEW patient_contacts WITH (status = 'active') AS"
+          "SELECT getResourceKey() AS patient_id, (SELECT system, value FROM telecom OR NULL)"
+          "FROM Patient WHERE birthDate.exists()")
+  (check-equal? (run "contacts.sof" "data/" "--format" "csv")
+                (list 0 "patient_id,system,value\r\nann,phone,555-0100\r\nann,email,ann@example.org\r\nbob,,\r\n" ""))
+  ;; the same text as a `#lang sql-on-fhir` module
+  (apply write! "module.sof" "#lang sql-on-fhir" patients-sof)
+  (check-equal? (run "module.sof" "data/" "--format" "csv")
+                (list 0 "id,family,gender,birth_date\r\nann,Lee,female,1974-12-25\r\nbob,Ortiz,male,1990-03-01\r\n" "")))
+
+(test-case "a problem in source text is its line, column and message, exit 1"
+  (write! "bad-column.sof" "SELECT id," "  name.family" "FROM Patient")
+  (check-equal? (run "bad-column.sof" "data/") (list 1 "" "sql-on-fhir: bad-column.sof:2:3: this column needs a name: write `name.family AS <name>`\n"))
+  (write! "lower.sof" "select id from Patient")
+  (check-equal? (run "lower.sof" "data/")
+                (list 1 "" "sql-on-fhir: lower.sof:1:1: unexpected word `select` (keywords are written in capitals: `SELECT`; in lower case `select` is read as part of a path)\n"))
+  (write! "badname.sof" "SELECT id AS `patient-id` FROM Patient")
+  (check-equal? (command "compile" "badname.sof")
+                (list 1 "" "sql-on-fhir: badname.sof:1:1: not a valid ViewDefinition: select[0].column[0].name \"patient-id\" is not a name a database takes: letters, digits and _ only, starting with a letter\n"))
+  ;; a module of source text that does not compile: its place in the file, the line and a caret
+  (write! "badmodule.sof" "#lang sql-on-fhir" "" "SELECT id," "  name. AS n" "FROM Patient")
+  (define bad (run "badmodule.sof" "data/"))
+  (check-equal? (car bad) 1)
+  (check-regexp-match #rx"badmodule.sof:4:3: sql-on-fhir compile error: the path \"name.\" is not FHIRPath: the expression ends after `.`" (caddr bad))
+  (check-false (regexp-match? #rx"context[.][.][.]" (caddr bad))))
+
+(test-case "a bare query has no `status`: said where the statement begins, with how to write it"
+  (write! "bare.sof" "-- no header" "SELECT id FROM Patient")
+  (check-equal? (run "bare.sof" "data/" "--format" "csv")
+                (list 0 "id\r\nann\r\nbob\r\n"
+                      "sql-on-fhir: warning: bare.sof:2:1: no `status` (the standard requires it: \"draft\", \"active\", \"retired\" or \"unknown\"): CREATE VIEW <name> WITH (status = 'active') AS …\n"))
+  ;; a path to an element the type lacks is said at the path
+  (write! "typo.sof" "CREATE VIEW v WITH (status = 'active') AS" "SELECT id, nmae.family AS family FROM Patient")
+  (define typo (run "typo.sof" "data/"))
+  (check-equal? (car typo) 1)
+  (check-regexp-match #rx"^sql-on-fhir: typo.sof:2:12: no element Patient.nmae [(]did you mean `name`[?][)]" (caddr typo)))
+
+(test-case "compile prints the ViewDefinitions a text states; decompile goes back"
+  (define compiled (command "compile" "patients.sof"))
+  (check-equal? (car compiled) 0)
+  (check-equal? (string->jsexpr (cadr compiled))
+                (hasheq 'resourceType "ViewDefinition" 'name "patients" 'status "active" 'resource "Patient"
+                        'select (list (hasheq 'column (list (hasheq 'path "getResourceKey()" 'name "id") (hasheq 'path "name.family.first()" 'name "family")
+                                                            (hasheq 'path "gender" 'name "gender") (hasheq 'path "birthDate" 'name "birth_date"))))))
+  (check-regexp-match #rx"^{\n  \"resourceType\": \"ViewDefinition\",\n  \"name\": \"patients\"," (cadr compiled))
+  ;; -o writes each view to <dir>/<name>.view.json and says where
+  (check-equal? (command "compile" "patients.sof" "-o" "views") (list 0 "views/patients.view.json\n" ""))
+  (check-equal? (command "decompile" "views/patients.view.json")
+                (list 0 (string-append "CREATE VIEW patients\n  WITH (status = 'active')\nAS\nSELECT\n  getResourceKey() AS id,\n  name.family.first() AS family,\n"
+                                       "  gender,\n  birthDate AS birth_date\nFROM Patient\n")
+                      ""))
+  ;; and the JSON it wrote runs as the text did
+  (check-equal? (cadr (run "views/patients.view.json" "data/" "--format" "csv")) (cadr (run "patients.sof" "data/" "--format" "csv")))
+  ;; what is no ViewDefinition has no text
+  (check-equal? (command "decompile" "data/ann.json") (list 1 "" "sql-on-fhir: data/ann.json cannot be written as source text: the resource is a Patient\n")))
+
+(test-case "the manual's decompiled view is what decompile prints for the guide's view"
+  (define guide-view (cadr (regexp-match #px"```view\n(.*?)```" (file->string (build-path (collection-path "sql-on-fhir") "guide.md")))))
+  (write! "bp_readings.view.json" guide-view)
+  (define printed (command "decompile" "bp_readings.view.json"))
+  (check-equal? (car printed) 0)
+  (check-true (string-contains? (file->string (build-path (collection-path "sql-on-fhir") "scribblings" "sql-on-fhir.scrbl"))
+                                (string-append "$ raco sql-on-fhir decompile bp_readings.view.json\n" (cadr printed)))))
 
 (delete-directory/files dir)

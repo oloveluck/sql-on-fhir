@@ -12,9 +12,20 @@ and worked example, and the common problems (that guide is what fhir-mcp serves 
 `sql-on-fhir` and `raco sql-on-fhir` are the same tool (the standalone build is `dist/bin/sql-on-fhir`).
 
 ## The loop
+0. **Write the view as source text**, a `.sof` file (`LANGUAGE.md` defines it; `guide.md` has the
+   rules in ten lines):
+   ```
+   CREATE VIEW patients WITH (status = 'active') AS
+   SELECT getResourceKey() AS id, gender, birthDate AS birth_date
+   FROM Patient
+   ```
+   `raco sql-on-fhir compile patients.sof` prints the ViewDefinition (JSON) it states, `-o dir/`
+   writes `dir/patients.view.json`; `raco sql-on-fhir decompile patients.view.json` goes back. A
+   ViewDefinition as JSON runs the same way as the text. A mistake in the text is one line with its
+   place, exit 1: ``patients.sof:2:3: this column needs a name: write `name.family AS <name>` ``.
 1. **Run the view over data.** The data is a directory of FHIR JSON files, a Bundle, or one resource:
    ```
-   raco sql-on-fhir run patients.view.json data/ --format csv
+   raco sql-on-fhir run patients.sof data/ --format csv
    ```
    ```
    id,gender,birth_date
@@ -110,6 +121,11 @@ suite (144/144, the floor; `-v` also prints each failure). `model/` is GENERATED
 refreshes the package and the suite. `tests/guide-test.rkt` keeps guide.md's examples true;
 `tests/cli-test.rkt` runs the command itself (messages, warnings, exit statuses, `--fhir-version`);
 `tests/tck-test.rkt` also holds the IG's own ten example views to be accepted as published.
+The source language: `LANGUAGE.md` is its definition, `parser/lexer.rkt` and `parser/grammar.rkt`
+(brag; the document prints these rules) its tokens and grammar, `compile.rkt` text to
+ViewDefinition, `decompile.rkt` back, `sof.rkt` the checked reading; `tests/language-test.rkt`
+holds the document to the code and the round trip to the suite's views. Change the grammar and the
+document together.
 The modules: `features.rkt` (the list), `main.rkt` (`(require sql-on-fhir)`), `definition.rkt` (a
 view held to the IG's definition), `view.rkt` (the engine: a view compiled once, then run),
 `operations.rkt`, `unread.rkt`, `workspace.rkt`, `cli.rkt`.
