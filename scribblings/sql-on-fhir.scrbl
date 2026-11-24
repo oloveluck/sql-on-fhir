@@ -2,7 +2,7 @@
 @; Text in @tt is shown exactly as written: no curly quotes, and "--" stays two hyphens.
 @(require (only-in scribble/core [element literal-element]))
 @(define (tt . text) (literal-element (quote tt) text))
-@(require (for-label racket/base racket/contract sql-on-fhir/view sql-on-fhir/definition sql-on-fhir/operations sql-on-fhir/workspace))
+@(require (for-label racket/base racket/contract sql-on-fhir/features sql-on-fhir/view sql-on-fhir/definition sql-on-fhir/operations sql-on-fhir/workspace))
 
 @; a path shown inline, with its single quotes kept straight (plain @tt would curl them)
 @(define (path . strs) (tt (literal (apply string-append strs))))
@@ -38,7 +38,9 @@ id: @secref["keys"].}
 @item{@bold{Choose the output} for what reads it next, a spreadsheet, a database loader or another
 FHIR system: @secref["formats"].}
 @item{@bold{Use a view from a program}, as rows in Racket or as a FHIR operation over HTTP:
-@secref["racket"] and @secref["operation"].}]
+@secref["racket"] and @secref["operation"].}
+@item{@bold{See everything the package does, as one list}, with what it does not do:
+@secref["features"].}]
 
 @section[#:tag "first"]{A first example}
 
@@ -416,6 +418,7 @@ The command you will use is @tt{run}. The others are for people working on the p
 
 @tabular[#:style 'boxed #:sep @hspace[2]
 (list (list @tt{raco sql-on-fhir run view.json data/ [--format ndjson|json|csv|fhir] [--fhir-version 4.0.1|5.0.0|6.0.0]} @elem{a view (JSON, or a @hash-lang[] @tt{sql-on-fhir} module of any extension) over a directory, Bundle or resource})
+      (list @tt{raco sql-on-fhir features [<table>] [--json]} @elem{everything the package does, as a list (@secref["features"])})
       (list @tt{raco sql-on-fhir tck [-v]} @elem{the shared test suite, with its report; @tt{-v} prints each failure})
       (list @tt{raco sql-on-fhir regen} @elem{regenerate the ViewDefinition model from the specification's package in @tt{spec/}})
       (list @tt{raco sql-on-fhir check} "verify the generated model is current")
@@ -679,6 +682,57 @@ workflow for an agent using the command line.}
 @item{@bold{In an editor.} The family's language server does not cover views. A JSON view is
 checked when it runs; a @hash-lang[] @tt{sql-on-fhir} file is checked when it compiles.}]
 
+@section[#:tag "features"]{Everything it does, as a list}
+
+The standard is three things: the parts of a view, what a path inside a view may call, and two
+operations that run views. @tt{raco sql-on-fhir features} lists each of them part by part and says
+what this package does with it, then what the package adds: what makes it refuse a view, what it
+warns about, its commands, what a Racket program can call, what a fhir-mcp workspace gets, and what
+it does not do. Every row names the definition in the source that does the work, and the files of
+the standard's test suite that try it.
+
+The list has twelve tables. Name one to see it alone (@tt{view}, @tt{path}, @tt{sql-run},
+@tt{sql-run-answers}, @tt{sql-export}, @tt{sql-export-answers}, @tt{refusals}, @tt{warnings},
+@tt{run}, @tt{racket}, @tt{workspace}, @tt{not-done}); @tt{--json} prints the rows as JSON.
+
+@verbatim|{
+$ raco sql-on-fhir features path
+SQL on FHIR, as this package does it. Each row: what is done with it, what you write, what it does;
+then the definition to read and the shared suite's files that try it.
+  yes: done as the specification says
+  partly: done in part
+  unused: accepted and kept; nothing is computed from it
+  refused: refused, with the reason
+  no: not done
+  own: this package's own
+
+In a path — what a column's, a where's, a forEach's or a repeat's path may call and name
+  yes      FHIRPath
+           every path is FHIRPath, run by the family's fhirpath engine: the whole language, not only the subset the specification requires of an implementation
+           [view.rkt `eval-expr`; suite: fhirpath, fhirpath_numbers, fn_boundary, fn_empty, fn_extension, fn_first, fn_join, fn_oftype, logic]
+  yes      getResourceKey()
+           the key of the resource: its id
+           [view.rkt `resource-key`; suite: fn_reference_keys]
+  yes      getReferenceKey([Type])
+           the key a reference points to: the id of a relative reference (Patient/p1 gives p1); with a type, of references to that type only
+           [view.rkt `reference-key`; suite: fn_reference_keys]
+  yes      %rowIndex
+           the position, from 0, of the current item in the nearest forEach, forEachOrNull or repeat
+           [view.rkt `rows-over`; suite: row_index]
+  yes      %<constant>
+           a constant of the view, by its name; a name the view does not define is an error
+           [view.rkt `constants-env`; suite: constant, constant_types]
+}|
+
+The first word of a row is what is done with the thing. @tt{unused} means it is accepted and
+nothing is computed from it, as with a column's description; @tt{refused} means the view or the
+call is turned down with the reason; @tt{own} marks what is this package's and not the standard's.
+
+The list is a file of the package, @tt{features.rkt}, and the package's tests hold it to the
+standard's own definitions: an element of a view, a parameter of an operation or an output format
+that the standard defines and the list does not name fails them, and so does a row that names a
+definition the source does not have.
+
 @section[#:tag "limits"]{Limits}
 
 @itemlist[
@@ -778,6 +832,49 @@ package is.
 
 Each top-level form builds a typed ViewDefinition; the module provides @racket[resources],
 @racket[(->nodes)] and @racket[(->json)].
+
+@subsection[#:style 'unnumbered]{@tt{sql-on-fhir}}
+@defmodule[sql-on-fhir #:no-declare]
+
+@racket[(require sql-on-fhir)] provides everything the modules below provide, but
+@racketmodname[sql-on-fhir/workspace]'s: the two operations and @racket[view-rows], the formats,
+the read log, @racket[read-view], the engine, and the feature list. It loads the view model, which
+is built over FHIR R6. A program that reads data as R4 or R5 loads that version's types first and
+keeps them, and only then loads this module:
+
+@verbatim|{
+(require fhir/r4/schemas (only-in fhir/model/registry pin-registered-types!))
+(pin-registered-types!)
+(define view-rows (dynamic-require 'sql-on-fhir 'view-rows))
+}|
+
+With that, a column reading R4's @tt{medication.ofType(CodeableConcept).text} has its value;
+without it the record is read as R6, which has no such element, and the cell is empty.
+
+@subsection[#:style 'unnumbered]{@tt{sql-on-fhir/features}}
+@defmodule[sql-on-fhir/features]
+
+@defstruct[feature ([area symbol?] [names (listof string?)] [state symbol?] [where (or/c list? #f)] [suite (listof symbol?)] [what string?])]{
+One row of the list (@secref["features"]): the table it belongs to; the thing as it is written
+(an element's path below @tt{ViewDefinition}, a parameter's name, a command's usage line); what is
+done with it, one of @racket['yes], @racket['partly], @racket['unused], @racket['refused],
+@racket['no] and @racket['own]; the file and the definition that does it, or @racket[#f]; the
+files of the shared test suite that try it; and a sentence.}
+@defstruct[table ([area symbol?] [title string?] [intro string?])]{A table of the list, with the heading it is printed under.}
+@deftogether[(
+@defthing[features (listof feature?)]
+@defthing[tables (listof table?)]
+@defthing[states (listof (cons/c symbol? string?))]
+@defproc[(features-of [area symbol?]) (listof feature?)])]{
+Every row, table by table; the tables in order; the states with what each means; the rows of one
+table.}
+@deftogether[(
+@defproc[(features->text [rows (listof feature?)]) string?]
+@defproc[(features->jsexpr [rows (listof feature?)]) list?])]{
+The rows as @tt{raco sql-on-fhir features} prints them, and as it prints them with @tt{--json}.}
+@defproc[(command-usages) (listof (list/c string? string?))]{
+The command line's commands with their usage lines: the rows of the @racket['run] table that are
+usage lines.}
 
 @subsection[#:style 'unnumbered]{@tt{sql-on-fhir/view}}
 @defmodule[sql-on-fhir/view]

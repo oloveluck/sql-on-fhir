@@ -98,6 +98,11 @@ A `#lang sql-on-fhir` module provides `resources` (typed views) and `(->json)`:
 `racket readings.sof` prints the view as JSON.
 
 ## Working on the engine
+Start with `features.rkt` (`raco sql-on-fhir features` prints it): one table of everything the
+package does — each element of a view, each function a path may call, each parameter of the two
+operations, what refuses a view, the commands, what `(require sql-on-fhir)` provides, what is not
+done — every row with the file and definition that does it. `tests/features-test.rkt` holds it to
+the IG's definitions, the code and the suite, so a new feature gets its row or the tests fail.
 `CLAUDE.md` is the architecture. `raco test .` runs everything; `raco sql-on-fhir tck` is the shared
 suite (144/144, the floor; `-v` also prints each failure). `model/` is GENERATED from the IG package in
 `spec/`: never edit it — `raco sql-on-fhir regen` rewrites it, `raco sql-on-fhir check` verifies it
@@ -105,5 +110,6 @@ suite (144/144, the floor; `-v` also prints each failure). `model/` is GENERATED
 refreshes the package and the suite. `tests/guide-test.rkt` keeps guide.md's examples true;
 `tests/cli-test.rkt` runs the command itself (messages, warnings, exit statuses, `--fhir-version`);
 `tests/tck-test.rkt` also holds the IG's own ten example views to be accepted as published.
-The modules: `definition.rkt` (a view held to the IG's definition), `view.rkt` (the engine: a view
-compiled once, then run), `operations.rkt`, `unread.rkt`, `workspace.rkt`, `cli.rkt`.
+The modules: `features.rkt` (the list), `main.rkt` (`(require sql-on-fhir)`), `definition.rkt` (a
+view held to the IG's definition), `view.rkt` (the engine: a view compiled once, then run),
+`operations.rkt`, `unread.rkt`, `workspace.rkt`, `cli.rkt`.

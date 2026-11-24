@@ -9,6 +9,8 @@
 ;;;   (view-rows view [resources])                     the rows themselves, as hashes
 ;;;   ($sql-export #:subject (list view …))            synchronous: the manifest comes back completed
 ;;;
+;;; (features.rkt lists every parameter of the two definitions with what is done with it here.)
+;;;
 ;;; $sql-run per the OperationDefinition:
 ;;;   view   : exactly one of subjectResource (inline; the subject), subjectCanonical (url[|version])
 ;;;            or subjectReference ("ViewDefinition/id"), the latter two from `current-data-source`.
@@ -128,14 +130,18 @@
 ;; reference-text : Reference | string -> string   "Patient/p1"
 (define (reference-text r) (if (hash? r) (hash-ref r 'reference "") r))
 
-;; refuse-unheld! : Inputs -> void   the inputs the definition names that are refused, not ignored:
+;; refused-inputs : (Listof (list name code message))   the inputs the definitions name that are
+;; refused when given, not ignored, each with the OperationOutcome code and the reason:
 ;; `parameters` belong to a SQLQuery or SQLView (the definition: rejected for a ViewDefinition),
 ;; `source` names data this implementation cannot reach
+(define refused-inputs
+  '(("parameters" "invalid" "`parameters` are a SQLQuery's or SQLView's: a ViewDefinition declares none")
+    ("source" "not-supported" "`source` is not supported: the data is the data source's, or the `resource` inputs")))
+;; refuse-unheld! : Inputs -> void   an operation's inputs, or one `subject`'s
 (define (refuse-unheld! in)
-  (when (pair? (hash-ref in "parameters" '()))
-    (operation-error "invalid" "`parameters` are a SQLQuery's or SQLView's: a ViewDefinition declares none"))
-  (when (pair? (hash-ref in "source" '()))
-    (operation-error "not-supported" "`source` is not supported: the data is the data source's, or the `resource` inputs")))
+  (for ([r (in-list refused-inputs)])
+    (when (pair? (hash-ref in (car r) '()))
+      (operation-error (cadr r) "~a" (caddr r)))))
 
 ;; view-data : Inputs ViewDefinition -> (listof resource)   the resources the view runs over (FHIR
 ;; JSON, of its type): the inline `resource` inputs, else the data source's; of the `patient`s and of
@@ -230,6 +236,21 @@
   (hasheq 'resourceType "Binary" 'contentType content-type
           'data (bytes->string/utf-8 (base64-encode (string->bytes/utf-8 body) #""))))
 
+;; A Format is (list name writer export?): an output format by its `_format` code;
+;;   writer  : View-node (Listof Row) header? -> resource   the table as the resource answered
+;;   export? : whether $sql-export writes it too (an export writes files)
+;; formats : (Listof Format)   the formats written. The IG's code system has one more, in
+;; `unwritten-formats`: a code in neither is no format.
+(define formats
+  (list (list "ndjson" (lambda (v rows header?) (binary "application/x-ndjson" (rows->ndjson rows))) #t)
+        (list "json" (lambda (v rows header?) (binary "application/json" (rows->json rows))) #t)
+        (list "csv" (lambda (v rows header?) (binary "text/csv" (rows->csv (view-columns v) rows #:header? header?))) #t)
+        (list "fhir" (lambda (v rows header?) (rows->parameters rows)) #f)))
+(define default-format "ndjson")
+;; unwritten-formats : (Listof (cons name message))   formats of the IG this implementation does not write
+(define unwritten-formats
+  '(("parquet" . "parquet output is not supported")))
+
 ;; run : view-jsexpr inputs format -> resource   one view, formatted
 (define (run view in fmt #:limit [limit #f] #:header? [header? #t])
   (define v (typed-view view))
@@ -243,13 +264,9 @@
                      (lambda (e) (operation-error "processing" "~a" (engine-message e)))])
       (eval-view v (filter-map typed-resource (view-data in view)))))
   (define rows (if (and (exact-integer? limit) (>= limit 0)) (take rows-all (min limit (length rows-all))) rows-all))
-  (match fmt
-    ["ndjson" (binary "application/x-ndjson" (rows->ndjson rows))]
-    ["json" (binary "application/json" (rows->json rows))]
-    ["csv" (binary "text/csv" (rows->csv (view-columns v) rows #:header? header?))]
-    ["fhir" (rows->parameters rows)]
-    ["parquet" (operation-error "not-supported" "parquet output is not supported")]
-    [_ (operation-error "invalid" "unknown _format ~a" fmt)]))
+  (cond [(assoc fmt formats) => (lambda (f) ((cadr f) v rows header?))]
+        [(assoc fmt unwritten-formats) => (lambda (u) (operation-error "not-supported" "~a" (cdr u)))]
+        [else (operation-error "invalid" "unknown _format ~a" fmt)]))
 
 ;; ---- the operations -----------------------------------------------------------------------------
 ;; header? : Inputs -> boolean   `header`, true unless given false. A false given in a Parameters
@@ -266,7 +283,7 @@
    sql-run-definition #:subject "subjectResource"
    (lambda (in _)
      (refuse-unheld! in)
-     (run (subject-view in) in (input in "_format" "ndjson") #:limit (input in "_limit") #:header? (header? in)))))
+     (run (subject-view in) in (input in "_format" default-format) #:limit (input in "_limit") #:header? (header? in)))))
 
 ;; subject-inputs : a `subject` repetition -> Inputs   its parts (name, subjectResource |
 ;; subjectCanonical | subjectReference); applied as a procedure, a subject may be the view itself, a
@@ -282,9 +299,9 @@
   (make-operation
    sql-export-definition
    (lambda (in _)
-     (define fmt (input in "_format" "ndjson"))
-     (when (equal? fmt "fhir")
-       (operation-error "invalid" "_format=fhir is $sql-run's: an export writes files (csv, ndjson or json)"))
+     (define fmt (input in "_format" default-format))
+     (when (for/or ([f (in-list formats)]) (and (equal? (car f) fmt) (not (caddr f))))
+       (operation-error "invalid" "_format=~a is $sql-run's: an export writes files (csv, ndjson or json)" fmt))
      (refuse-unheld! in)
      (define subjects (map subject-inputs (hash-ref in "subject" '())))
      (for-each refuse-unheld! subjects)
@@ -314,7 +331,8 @@
 (for-each register-operation! (list $sql-run $sql-export))
 
 (module+ test
-  (require rackunit (only-in racket/dict keyword-apply/dict))
+  (require rackunit (only-in racket/dict keyword-apply/dict)
+           (only-in "features.rkt" features-of feature-names feature-state))
   (define pts (list (hasheq 'resourceType "Patient" 'id "p1" 'gender "female" 'meta (hasheq 'lastUpdated "2026-01-02T00:00:00Z"))
                     (hasheq 'resourceType "Patient" 'id "p2" 'gender "male")))
   (define view (hasheq 'resourceType "ViewDefinition" 'name "patients" 'status "active" 'resource "Patient"
@@ -393,6 +411,19 @@
     (check-equal? (length (filter (lambda (p) (equal? (hash-ref p 'name) "output"))
                                   (hash-ref ($sql-export #:subject (list view (hash-set view 'name "again"))) 'parameter)))
                   2))
+  ;; ---- the tables above are the rows features.rkt lists ---------------------------------------------
+  (define (rows-in area state)
+    (sort (for*/list ([f (in-list (features-of area))] #:when (eq? (feature-state f) state) [n (in-list (feature-names f))]) n) string<?))
+  (define (format-rows area state) (for*/list ([n (in-list (rows-in area state))] [m (in-value (regexp-match #rx"^_format=(.*)$" n))] #:when m) (cadr m)))
+  (check-equal? (format-rows 'sql-run 'yes) (sort (map car formats) string<?))
+  (check-equal? (format-rows 'sql-export 'yes) (sort (for/list ([f (in-list formats)] #:when (caddr f)) (car f)) string<?))
+  (check-equal? (format-rows 'sql-run 'refused) (map car unwritten-formats))
+  (check-equal? (format-rows 'sql-export 'refused)
+                (sort (append (map car unwritten-formats) (for/list ([f (in-list formats)] #:unless (caddr f)) (car f))) string<?))
+  (define (not-a-format names) (filter (lambda (n) (not (regexp-match? #rx"^_format=" n))) names))
+  (check-equal? (not-a-format (rows-in 'sql-run 'refused)) (sort (map car refused-inputs) string<?))
+  (check-equal? (not-a-format (rows-in 'sql-export 'refused))
+                (sort (list "source" "subject.parameters") string<?))            ; each subject's inputs are held too
   ;; ---- what the definitions of the operations say, held -------------------------------------------
   (define (code-of thunk) (with-handlers ([exn:fail:operation? (lambda (e) (hash-ref (car (hash-ref (exn:fail:operation-outcome e) 'issue)) 'code))]) (thunk) 'ran))
   (define obs (for/list ([id (in-list '("o1" "o2" "o3"))] [patient (in-list '("p1" "p2" "p3"))])

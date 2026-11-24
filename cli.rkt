@@ -10,6 +10,10 @@
 ;;;       states no `status`, and data the view reads that the read left out (an element that
 ;;;       version does not have, a value that is not valid FHIR), and a view that names the FHIR
 ;;;       versions it is for (`fhirVersion`) when the data is read as another.
+;;;   raco sql-on-fhir features [<table>] [--json]
+;;;       everything the package does, as a list (features.rkt): a ViewDefinition's elements, what a
+;;;       path may call, the two operations' parameters, what refuses a view, the commands, the
+;;;       Racket API — each with what is done with it and the definition that does it
 ;;;   raco sql-on-fhir tck [-v]        the shared test suite (FHIR/sql-on-fhir.js tests, vendored)
 ;;;   raco sql-on-fhir regen | check   regenerate the model from spec/ | verify it is up to date
 ;;;   raco sql-on-fhir fetch [--version V] [--tests-commit SHA]
@@ -17,6 +21,7 @@
 
 (require racket/list racket/file racket/port racket/string racket/runtime-path (for-syntax racket/base) json net/url net/base64
          fhir/subcommands fhir/operation fhir/data-source
+         (only-in "features.rkt" command-usages features features-of tables table-area features->text features->jsexpr)
          (only-in fhir/serialize/to-json node->jsexpr)
          (only-in fhir/model/registry pin-registered-types!)
          (only-in fhir/diagnostic diagnostic-message diagnostic-loc loc-line loc-column))
@@ -29,12 +34,9 @@
   (unless (path? src) (raise-user-error 'sql-on-fhir "fetch works in a source checkout of sql-on-fhir"))
   (let-values ([(dir _name _dir?) (split-path src)]) dir))
 
-(define usages
-  '(("run"   "raco sql-on-fhir run <view.json | view.rkt> [<data dir | bundle.json | resource.json>] [--format ndjson|json|csv|fhir] [--fhir-version 4.0.1|5.0.0|6.0.0]")
-    ("tck"   "raco sql-on-fhir tck [-v]")
-    ("regen" "raco sql-on-fhir regen")
-    ("check" "raco sql-on-fhir check")
-    ("fetch" "raco sql-on-fhir fetch [--version 3.0.0-ballot] [--tests-commit <sha>]")))
+;; usages : (listof (list command usage-line))   the commands, as features.rkt lists them (its rows
+;; that are usage lines)
+(define usages (command-usages))
 
 (define (opt args name default)
   (let ([m (member name args)]) (if (and m (pair? (cdr m))) (cadr m) default)))
@@ -191,6 +193,25 @@
       (void (write-bytes (base64-decode (string->bytes/utf-8 (hash-ref result 'data)))))
       (displayln (jsexpr->string result))))
 
+;; ---- features -----------------------------------------------------------------------------------
+;; cmd-features : args -> void   the feature list (features.rkt), or one of its tables by name; as
+;; text, or with --json as a list of objects
+(define (cmd-features args)
+  (define names (filter (lambda (a) (not (regexp-match? #rx"^--" a))) args))
+  (define areas (map (lambda (t) (symbol->string (table-area t))) tables))
+  (for ([n (in-list names)] #:unless (member n areas))
+    (usage-error "sql-on-fhir" usages "features" (format "no table ~a: the tables are ~a" n (string-join areas ", "))))
+  (define rows (if (null? names) features (append-map (lambda (n) (features-of (string->symbol n))) names)))
+  (if (member "--json" args)
+      (displayln (jsexpr->string (features->jsexpr rows)))
+      (display (features->text rows))))
+
+;; ---- the shared suite ---------------------------------------------------------------------------
+;; cmd-tck : args -> void   tests/run.rkt's report, against its floor
+(define (cmd-tck args)
+  (parameterize ([current-command-line-arguments (list->vector args)])
+    (dynamic-require '(submod sql-on-fhir/tests/run main) #f)))
+
 ;; ---- codegen ------------------------------------------------------------------------------------
 (define (target) (dynamic-require 'sql-on-fhir/target 'target-sql-on-fhir))
 (define (cmd-regen _) ((dynamic-require 'fhir/codegen/gen 'generate-tower) (target)))
@@ -224,8 +245,34 @@
       1))
   (printf "tests/vendor/sql-on-fhir-tests: ~a files from FHIR/sql-on-fhir.js@~a — update its SOURCE.txt, then raco sql-on-fhir tck\n" n commit))
 
+;; handlers : (hash command -> (args -> any))   one to a command of `usages`
+(define handlers
+  (hash "run" cmd-run "features" cmd-features "tck" cmd-tck
+        "regen" cmd-regen "check" cmd-check "fetch" cmd-fetch))
+
 (module+ test
-  (require rackunit)
+  (require rackunit (only-in "features.rkt" feature-names feature-state))
+  ;; every command features.rkt lists has its handler, and there is no other
+  (check-equal? (sort (map car usages) string<?) (sort (hash-keys handlers) string<?))
+  ;; the options `run` takes are the ones its rows say: the FHIR versions there is a tower for, and
+  ;; the formats $sql-run writes
+  (define (option-values name)
+    (for*/first ([f (in-list (features-of 'run))] [n (in-list (feature-names f))]
+                 [m (in-value (regexp-match (pregexp (string-append "^" name " (.*)$")) n))] #:when m)
+      (string-split (cadr m) "|")))
+  (check-equal? (option-values "--fhir-version") (map car fhir-versions))
+  (check-equal? (sort (option-values "--format") string<?)
+                (sort (for*/list ([f (in-list (features-of 'sql-run))] #:when (eq? (feature-state f) 'yes)
+                                  [n (in-list (feature-names f))] [m (in-value (regexp-match #rx"^_format=(.*)$" n))] #:when m)
+                        (cadr m))
+                      string<?))
+  (for ([o (in-list '("--format ndjson|json|csv|fhir" "--fhir-version 4.0.1|5.0.0|6.0.0"))])
+    (check-true (string-contains? (cadr (assoc "run" usages)) (string-append "[" o "]")) o))
+  ;; `features`: every table, one table, as JSON; a table there is not is a usage error
+  (define (printed . args) (let ([o (open-output-string)]) (parameterize ([current-output-port o]) (cmd-features args)) (get-output-string o)))
+  (check-equal? (printed) (features->text features))
+  (check-equal? (printed "path") (features->text (features-of 'path)))
+  (check-equal? (string->jsexpr (printed "path" "--json")) (features->jsexpr (features-of 'path)))
   ;; (tests/cli-test.rkt runs the command itself, in a process of its own)
   (define (positioned-exn msg source)
     (exn:fail:read msg (current-continuation-marks) (list (srcloc source 2 0 19 1))))
@@ -246,9 +293,5 @@
 (module+ main
   (run-subcommands
    "sql-on-fhir" usages
-   (hash "run" cmd-run
-         "tck" (lambda (args)
-                 (parameterize ([current-command-line-arguments (list->vector args)])
-                   (dynamic-require '(submod sql-on-fhir/tests/run main) #f)))
-         "regen" cmd-regen "check" cmd-check "fetch" cmd-fetch)
+   handlers
    (vector->list (current-command-line-arguments))))

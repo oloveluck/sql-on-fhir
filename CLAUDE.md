@@ -3,6 +3,38 @@
 Part of the fhir family (conventions, HTDP style and the package map live in the main `fhir` repo's
 CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
 
+- **Start at `features.rkt`** (2026-11-24; `raco sql-on-fhir features [<table>] [--json]` prints it).
+  The owner: "It should be easier to see from the code all of the available features operations and
+  things I can do in sql on fhir." It was not: the list was prose in two header comments and
+  otherwise the clauses of `compile-select`, `rewrite-sof`, a `match` on the format and `input in
+  "…"` calls. Now ONE table of 113 rows in twelve tables — a ViewDefinition's elements (`view`),
+  what a path may call (`path`), each parameter the two operations take and answer (`sql-run`,
+  `sql-run-answers`, `sql-export`, `sql-export-answers`), `refusals`, `warnings`, the command line
+  (`run`), `racket`, `workspace`, `not-done`. A Feature is (area names state where suite what):
+  state is `yes | partly | unused | refused | no | own`, `where` the file and definition to read,
+  `suite` the shared suite's files. It has no dependency on the engine (cli.rkt requires it
+  statically; its `usages` ARE the rows that are usage lines, `command-usages`).
+  The table is an index and is held, both ways:
+  - `tests/features-test.rkt` against the IG package (every element of the ViewDefinition's
+    snapshot, every `in`/`out` parameter and part of the two OperationDefinitions, every code of
+    OutputFormatCodes, each of the IG's StructureDefinitions by name: a row each, and no row the IG
+    lacks — a regenerated newer IG fails here until a row says what is done with what is new),
+    against the code (every `where` names a definition its file has; the element names view.rkt
+    reads with `pstr`/`fld`/`flds`, the `value<Type>` keys of a constant, and the input names
+    operations.rkt holds as strings are exactly the rows that say something is done), against
+    `(require sql-on-fhir)`'s exports, and against the suite (every file is some row's);
+  - each module's own tests against its rows, because the dispatch is now DATA there:
+    view.rkt `sof-functions` (name -> SofRewrite: `resource-key`, `reference-key`; `rewrite-sof`
+    looks a call up in it), operations.rkt `formats` (name, writer, export?), `unwritten-formats`
+    and `refused-inputs` (name, OperationOutcome code, message; `refuse-unheld!` reads it),
+    cli.rkt `handlers` (one to a usage line; `cmd-tck`, `cmd-features` are named now) and
+    `fhir-versions`, definition.rkt's own constraints.
+  Five planted mistakes (an element misspelt, a definition that is not there, an input marked
+  unused that is read, a suite file that is not there, an export without a row) each fail it.
+  `main.rkt` is new: `(require sql-on-fhir)` is the modules' exports in one require (not
+  workspace.rkt's), its header the map of the package. No behaviour changed: the 144/144 and every
+  earlier test are as they were; tests 295 -> 1,297 (most of the new ones are the list's checks, one
+  per row and pointer). When adding a feature: its row first.
 - **From the spec.** `target.rkt` is a fhir/codegen target over `spec/hl7.fhir.uv.sql-on-fhir.tgz`
   (whitelist ViewDefinition, delegating to the R6 tower, collection "sql-on-fhir"): `model/` is
   GENERATED — never edit it; `raco sql-on-fhir regen` writes it, `check` (and tests/tck-test.rkt)

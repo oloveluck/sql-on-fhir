@@ -39,6 +39,9 @@ step by step, a row per record or per repeated item, filters, output formats, an
 
 - For agents: [guide.md](guide.md), a cheat sheet and the common problems, each one tested; and
   the [sql-on-fhir skill](.claude/skills/sql-on-fhir/SKILL.md).
+- What it does, all of it, as one list: `sql-on-fhir features`, printed from
+  [features.rkt](features.rkt) — each part of a view, each parameter of the two operations, what is
+  refused and what is not done, with the definition in the source that does it.
 - How well it works (all 144 tests of the shared SQL on FHIR suite): [TESTING.md](TESTING.md).
 - How it is built: [CLAUDE.md](CLAUDE.md).
 

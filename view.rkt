@@ -40,6 +40,8 @@
 ;;; An Expr is (expr text ast verdicts) — a path parsed once, getResourceKey/getReferenceKey
 ;;;   rewritten; verdicts : focus type -> #f | exn, the static pass's answer, asked once per type
 ;;;
+;;; (features.rkt lists every element of a view with the definition here that reads it.)
+;;;
 ;;; What can be told of a view without data is told when it is compiled, as an `exn:fail:view`: a
 ;;; path that does not parse, `unionAll` branches whose columns differ, a column name used twice, no
 ;;; `resource`. What depends on the data (a column with several values, a `where` that is no
@@ -264,24 +266,46 @@
                    (lambda (_) '())])
     (eval-expr x focus consts idx)))
 
-;; ---- SOF-specific function rewrite ------------------------------------------
-;; getResourceKey() -> id ; X.getReferenceKey([Type]) ->
-;;   X[.where(reference.matches('^Type/…'))].reference.replaceMatches('^[^/]+/', '')
-;; A pure structural rewrite over the prefab FHIRPath AST (nothing in the engine changes).
+;; ---- the IG's own functions ---------------------------------------------------
+;; A path may call two functions FHIRPath does not have. Each is rewritten, once, into plain
+;; FHIRPath over the prefab AST (nothing in the engine changes):
+;;   getResourceKey()         -> id
+;;   X.getReferenceKey([Type]) -> X[.where(reference.matches('^Type/…'))].reference.replaceMatches('^[^/]+/', '')
+;; A SofRewrite is (target-AST|#f (Listof argument-AST) -> AST | #f): the call as plain FHIRPath,
+;; or #f when the arguments are not ones the function takes (the call is then left as written, and
+;; FHIRPath says it knows no such function).
+
+;; resource-key : SofRewrite   the resource's key is its id
+(define (resource-key target args)
+  (and (null? args) (fp-invoke target 'id)))
+
+;; reference-key : SofRewrite   the id part of a relative reference; with a type, of references to
+;; that type only. Untyped, the target is kept as it is.
+(define (reference-key target args)
+  (define typed
+    (match args
+      [(list (fp-invoke #f ty))
+       (fp-call target 'where
+                (list (fp-call (fp-invoke #f 'reference) 'matches
+                               (list (fp-lit (format "^~a/[^/]+$" ty))))))]
+      [_ (or target (fp-invoke #f 'reference))]))
+  (fp-call (fp-invoke typed 'reference) 'replaceMatches (list (fp-lit "^[^/]+/") (fp-lit ""))))
+
+;; sof-functions : (Hash Symbol SofRewrite)   the functions the IG adds to FHIRPath, by name
+;; (features.rkt lists them in `in-a-path`)
+(define sof-functions
+  (hasheq 'getResourceKey resource-key
+          'getReferenceKey reference-key))
+
+;; rewrite-sof : AST -> AST   every call of one of `sof-functions` as plain FHIRPath: a structural
+;; recursion over the FHIRPath AST
 (define (rewrite-sof ast)
   (match ast
-    [(fp-call t 'getResourceKey '()) (fp-invoke (and t (rewrite-sof t)) 'id)]
-    [(fp-call t 'getReferenceKey args)
-     (define t* (and t (rewrite-sof t)))
-     (define typed
-       (match args
-         [(list (fp-invoke #f ty))
-          (fp-call t* 'where
-                   (list (fp-call (fp-invoke #f 'reference) 'matches
-                                  (list (fp-lit (format "^~a/[^/]+$" ty))))))]
-         [_ (if t* t* (fp-invoke #f 'reference))]))     ; untyped: keep the target as-is
-     (fp-call (fp-invoke typed 'reference) 'replaceMatches (list (fp-lit "^[^/]+/") (fp-lit "")))]
-    [(fp-call t n args) (fp-call (and t (rewrite-sof t)) n (map rewrite-sof args))]
+    [(fp-call t n args)
+     (define target (and t (rewrite-sof t)))
+     (define rewrite (hash-ref sof-functions n #f))
+     (or (and rewrite (rewrite target args))
+         (fp-call target n (map rewrite-sof args)))]
     [(fp-invoke t n) (fp-invoke (and t (rewrite-sof t)) n)]
     [(fp-binop op l r) (fp-binop op (rewrite-sof l) (rewrite-sof r))]
     [(fp-unop op o) (fp-unop op (rewrite-sof o))]
@@ -316,6 +340,7 @@
 
 (module+ test
   (require rackunit json
+           (only-in "features.rkt" features-of feature-names)
            (only-in sql-on-fhir/model/types)
            (only-in fhir/serialize/from-json from-json)
            (only-in fhir/result/result ok-value))
@@ -328,6 +353,19 @@
                                                  'column (list (hasheq 'name "family" 'path "family")))))))
   (check-equal? (eval-view view (list pt))
                 '(((id . "p1") (family . "Chalmers")) ((id . "p1") (family . "Windsor"))))
+  ;; the IG's functions are the ones features.rkt lists (`in-a-path`: a name with parentheses)
+  (check-equal? (sort (map symbol->string (hash-keys sof-functions)) string<?)
+                (sort (for*/list ([f (in-list (features-of 'path))] [n (in-list (feature-names f))]
+                                  [m (in-value (regexp-match #px"^(\\w+)[(]" n))] #:when m)
+                        (cadr m))
+                      string<?))
+  ;; a call the function does not take is left as written: FHIRPath then says it knows none such
+  (check-equal? (rewrite-sof (parse-fhirpath "getResourceKey()")) (parse-fhirpath "id"))
+  (check-equal? (rewrite-sof (parse-fhirpath "getResourceKey(1)")) (parse-fhirpath "getResourceKey(1)"))
+  (check-equal? (rewrite-sof (parse-fhirpath "subject.getReferenceKey(Patient)"))
+                (parse-fhirpath "subject.where(reference.matches('^Patient/[^/]+$')).reference.replaceMatches('^[^/]+/', '')"))
+  (check-equal? (rewrite-sof (parse-fhirpath "subject.getReferenceKey()"))
+                (parse-fhirpath "subject.reference.replaceMatches('^[^/]+/', '')"))
   (check-equal? (view-columns view) '(id family))
   ;; a view that names no resource type says so (it was `string->symbol: contract violation`)
   (check-exn #rx"eval-view: the view has no `resource`"

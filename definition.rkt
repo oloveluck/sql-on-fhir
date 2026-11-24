@@ -196,7 +196,7 @@
         "sql-expressions" "has more than one of `forEach`, `forEachOrNull` and `repeat`: a select takes one"))
 
 (module+ test
-  (require rackunit)
+  (require rackunit (only-in "features.rkt" features-of feature-names feature-where))
   (define view (hasheq 'resourceType "ViewDefinition" 'name "patients" 'status "active" 'resource "Patient"
                        'select (list (hasheq 'column (list (hasheq 'name "id" 'path "id"))))))
   (check-true (fhir? (read-view view)))
@@ -206,6 +206,11 @@
                   (list (hash-ref e 'path) (hash-ref k 'key)))
                 '(("ViewDefinition.name" "sql-name") ("ViewDefinition.constant.name" "sql-name")
                   ("ViewDefinition.select" "sql-expressions") ("ViewDefinition.select.column.name" "sql-name")))
+  ;; and they are the constraints features.rkt lists among what refuses a view
+  (check-equal? (remove-duplicates (for*/list ([e (in-list (force definition-elements))] [k (in-list (own-constraints e))]) (hash-ref k 'key)))
+                (for*/list ([f (in-list (features-of 'refusals))] #:when (equal? (feature-where f) '(definition.rkt own-constraints))
+                            [n (in-list (feature-names f))])
+                  n))
   ;; sql-name: the view's, a constant's and a column's name, each said where it is, with the name
   (define (column name) (hasheq 'column (list (hasheq 'name name 'path "id"))))
   (check-equal? (read-view (hash-set* view 'name "my patients"

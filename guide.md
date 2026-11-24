@@ -62,7 +62,11 @@ sql-on-fhir run patients.view.json data/ --format csv   # a directory of resourc
 sql-on-fhir run patients.view.json bundle.json          # NDJSON, the default; also json, fhir
 sql-on-fhir run readings.sof data/                      # a #lang sql-on-fhir module, whatever its extension
 sql-on-fhir run meds.view.json r4/ --fhir-version 4.0.1 # read the data as R4 (or 5.0.0); R6 is the default
+sql-on-fhir features                                    # everything it does, as a list; `features view`, `features sql-run` … for one table
 ```
+`features` is the map: every element of a view, every function a path may call, every parameter of
+`$sql-run` and `$sql-export`, what refuses a view and what is not done, each with what happens to
+it here (`yes`, `partly`, `unused`, `refused`, `no`) and the definition in the source that does it.
 A view that is not a ViewDefinition (a misspelled element, a wrong type, a required element left
 out, a name a database does not take, a path that is not FHIRPath) is refused before it reads any
 data, with the reason and exit status 1; so is a view that fails on the
