@@ -279,3 +279,12 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
   (`node-drops #:read-only? #t`); it computed every resource's drops up front by writing the node
   back as JSON (`lenient-drops`). The notes are the same: `unread.rkt` still keeps what a chain
   reads, and every chain's objects were read. All 295 tests unchanged.
+
+- **A view's codes are its own model's** (2026-11-25). `definition.rkt` `binding-problems` asks
+  `fhir/model/binding`'s `latest-binding-expansion`: the codes the tower loaded LAST registered,
+  which is this model's (it is built over R6 and loaded after a process's own FHIR version). The
+  foundation now pins a process's value-set codes with its types (a value set's url is the same in
+  every version, and an R4 process had been told R6's codes for Observation.status); a
+  ViewDefinition is no R4 resource, and its `fhirVersion` takes "4.0", which R4's copy of the
+  value set does not hold — `tests/cli-test.rkt` (a view naming "4.0", run with
+  `--fhir-version 4.0.1`) failed until the two were told apart.

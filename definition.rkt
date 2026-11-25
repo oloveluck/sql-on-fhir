@@ -26,7 +26,7 @@
          (only-in fhir/serialize/from-json from-json)
          (only-in fhir/result/result ok? ok-value err-error validation-error-message)
          (only-in fhir/package read-package)
-         (only-in fhir/model/binding binding-expansion)
+         (only-in fhir/model/binding latest-binding-expansion)
          (only-in fhirpath/parser/parse parse-fhirpath)
          (only-in fhirpath/eval eval-fhirpath)
          (only-in fhirpath/value item->system))
@@ -100,9 +100,13 @@
                             (not (regexp-match? #rx"\\[x\\]" (hash-ref e 'path)))))
       (cons (map string->symbol (cdr (string-split (hash-ref e 'path) ".")))
             (car (string-split (hash-ref b 'valueSet) "|"))))))
+;; The codes are those THIS model's tower registered, which is the tower loaded last: a process
+;; that reads FHIR R4 data pins R4's codes for the value sets R4 has (fhir/model/binding), and
+;; a ViewDefinition is no R4 resource — its `fhirVersion` takes "4.0", which the value set of the
+;; version the view model is built over holds and R4's does not.
 (define (binding-problems js)
   (for*/list ([pb (in-list (force required-bindings))]
-              [exp (in-value (binding-expansion (cdr pb)))] #:when exp
+              [exp (in-value (latest-binding-expansion (cdr pb)))] #:when exp
               [v (in-list (values-at js (car pb)))]
               #:when (and (string? v) (not (hash-ref exp v #f))))
     (format "~s is not in the required value set for ViewDefinition.~a (~a)"
