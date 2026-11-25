@@ -288,3 +288,6 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
   ViewDefinition is no R4 resource, and its `fhirVersion` takes "4.0", which R4's copy of the
   value set does not hold — `tests/cli-test.rkt` (a view naming "4.0", run with
   `--fhir-version 4.0.1`) failed until the two were told apart.
+  A lesson of order: this repository's docs workflow installs `fhir` from its `main`, so a change
+  here that needs a new export of the foundation is pushed AFTER the foundation's. Pushed a
+  minute before, the run for that commit failed at `latest-binding-expansion` not being there.
