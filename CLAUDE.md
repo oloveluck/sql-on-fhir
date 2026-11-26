@@ -291,3 +291,11 @@ CLAUDE.md). Collection `sql-on-fhir`; `raco sql-on-fhir`.
   A lesson of order: this repository's docs workflow installs `fhir` from its `main`, so a change
   here that needs a new export of the foundation is pushed AFTER the foundation's. Pushed a
   minute before, the run for that commit failed at `latest-binding-expansion` not being there.
+
+- **What a view did not read is not reported** (2026-11-26; the main repo's CLAUDE.md, "The
+  Python client, second pass"). A lenient node reads a field when a path asks for it
+  (fhir/model/node's Reader), so `read-log-reads` hears only of values dropped from the elements
+  the view walked: a Patient with `birthDate: "1990-02-30"` is reported by a view with a
+  `birthDate` column and not by one of `id` alone (operations.rkt's test says both). The notes a
+  user sees are the same — `unread.rkt` already kept only what a chain reads. A view of two
+  columns over 5,000 Observations: 64 -> 42 ms in the engine. No file here changed but that test.
