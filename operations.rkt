@@ -362,12 +362,20 @@
     (check-exn #rx"where\\[0\\] has no `path`" (lambda () (view-rows (hash-set view 'where (list (hasheq))))))
     (check-exn #rx"constant\\[0\\] has no `value\\[x\\]`" (lambda () (view-rows (hash-set view 'constant (list (hasheq 'name "c"))))))
     (check-not-exn (lambda () (view-rows (hash-set view 'constant (list (hasheq 'name "c" 'valueString "x"))))))
-    ;; the read log: what the lenient read left out of each resource, counted over those read
-    (let ([log (make-read-log)]
-          [odd (hasheq 'resourceType "Patient" 'id "p3" 'gender "female" 'birthDate "1990-02-30")])
-      (check-equal? (length (parameterize ([current-read-log log]) (view-rows view (append pts (list odd))))) 3)
-      (check-equal? (read-log-count log) 3)
-      (check-equal? (read-log-reads log) (list (cons odd '(("birthDate" "1990-02-30"))))))
+    ;; the read log: what the lenient read left out of what the view READ of each resource, counted
+    ;; over those read. A node is read a field at a time (fhir/model/node), so a view that does not
+    ;; take the birth date never meets the one that is no date; a view that takes it does.
+    (let ([odd (hasheq 'resourceType "Patient" 'id "p3" 'gender "female" 'birthDate "1990-02-30")]
+          [born (hash-set view 'select (list (hasheq 'column (list (hasheq 'name "id" 'path "id") (hasheq 'name "born" 'path "birthDate")))))])
+      (let ([log (make-read-log)])
+        (check-equal? (length (parameterize ([current-read-log log]) (view-rows view (append pts (list odd))))) 3)
+        (check-equal? (read-log-count log) 3)
+        (check-equal? (read-log-reads log) '()))
+      (let ([log (make-read-log)])
+        (check-equal? (map (lambda (r) (hash-ref r 'born)) (parameterize ([current-read-log log]) (view-rows born (append pts (list odd)))))
+                      (list 'null 'null 'null))
+        (check-equal? (read-log-count log) 3)
+        (check-equal? (read-log-reads log) (list (cons odd '(("birthDate" "1990-02-30")))))))
     ;; `status` is required too and is not held: the shared suite's own views leave it out
     (check-equal? (length (view-rows (hash-remove view 'status))) 2)
     ;; by canonical, filtered, limited
